@@ -1,0 +1,52 @@
+# Environment & Secret variables
+.env
+*.env
+!.env.example
+config/client_secret.json
+config/token.json
+config/*.json
+!config/app.yaml
+!config/logging.yaml
+
+# Python cache & build outputs
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Data & Browser profiles / Scraped logs
+data/
+*.log
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.bak*
+
+# Excel temp / working files
+~$*.xlsx
+~$*.xlsm

@@ -1,0 +1,13 @@
+app:
+  name: "India Filling Hub"
+  version: "1.0.0"
+
+tracking:
+  default_timeout_ms: 30000
+  retry_attempts: 3
+
+automation:
+  headless: true
+  viewport:
+    width: 1280
+    height: 720

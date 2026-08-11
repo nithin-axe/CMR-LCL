@@ -1,0 +1,18 @@
+{
+  "tracking": {
+    "maersk": {
+      "script_path": "scripts/tracking/maersk_tracking.js",
+      "description": "Extract Maersk shipping container status"
+    },
+    "msc": {
+      "script_path": "scripts/tracking/msc_tracking.js",
+      "description": "Extract MSC shipping container status"
+    }
+  },
+  "parsing": {
+    "invoice": {
+      "script_path": "scripts/parsing/extract_invoice.js",
+      "description": "Parse invoice fields using custom DOM extractor"
+    }
+  }
+}

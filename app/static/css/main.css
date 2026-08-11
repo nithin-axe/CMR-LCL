@@ -1,0 +1,474 @@
+:root {
+    /* Surfaces — clean white business palette */
+    --bg-dark: #f6f7f9;      /* app canvas behind everything */
+    --bg-main: #f6f7f9;      /* main workspace background */
+    --sidebar-bg: #ffffff;
+    --card-bg: #ffffff;
+    --surface-muted: #f3f4f6;
+
+    --border-color: #e6e8eb;
+    --border-hover: #cdd3dc;
+
+    /* Restrained, professional accent used sparingly */
+    --accent-indigo: #4f46e5;
+    --accent-indigo-glow: rgba(79, 70, 229, 0.08);
+    --accent-emerald: #0f9d76;
+    --accent-emerald-glow: rgba(15, 157, 118, 0.10);
+    --accent-amber: #b7791f;
+    --accent-amber-glow: rgba(183, 121, 31, 0.10);
+    --accent-rose: #e11d48;
+    --accent-rose-glow: rgba(225, 29, 72, 0.08);
+
+    --text-primary: #1f2430;
+    --text-secondary: #5f6672;
+    --text-muted: #9aa1ad;
+
+    --font-sans: 'Inter', sans-serif;
+    --font-display: 'Outfit', sans-serif;
+
+    /* Soft, layered shadows for a premium paper feel */
+    --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+    --shadow-md: 0 4px 14px rgba(16, 24, 40, 0.07);
+    --shadow-lg: 0 18px 40px rgba(16, 24, 40, 0.10);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-dark);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+/* App Layout */
+.app-container {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 260px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
+
+.sidebar-brand {
+    padding: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.brand-icon {
+    width: 38px;
+    height: 38px;
+    background: linear-gradient(135deg, #6366f1, #4f46e5);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 1.1rem;
+    box-shadow: 0 4px 12px rgba(79, 70, 229, 0.22);
+}
+
+.brand-name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+.sidebar-nav {
+    padding: 24px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-grow: 1;
+}
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 16px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: 10px;
+    font-weight: 500;
+    font-size: 0.95rem;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.nav-item i {
+    font-size: 1.05rem;
+    transition: transform 0.2s ease;
+    color: var(--text-muted);
+}
+
+.nav-item:hover {
+    color: var(--text-primary);
+    background-color: var(--surface-muted);
+}
+
+.nav-item:hover i {
+    color: var(--text-secondary);
+    transform: translateX(2px);
+}
+
+.nav-item.active {
+    color: var(--accent-indigo);
+    background: var(--accent-indigo-glow);
+    font-weight: 600;
+}
+
+.nav-item.active i {
+    color: var(--accent-indigo);
+}
+
+/* Star-based mail routing - compact sidebar section (moved out of the Operations
+   Process tab, which was getting too long/pushed down with these as full cards). */
+.sidebar-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+}
+
+.sidebar-section-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    padding: 0 16px 8px;
+}
+
+.sidebar-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 16px;
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    font-weight: 500;
+    font-size: 0.88rem;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-action-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--surface-muted);
+}
+
+.sidebar-action-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.sidebar-action-btn i:first-child {
+    font-size: 0.9rem;
+    width: 16px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.sidebar-action-result {
+    font-size: 0.72rem;
+    padding: 2px 16px 10px;
+    margin: 0;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.sidebar-footer {
+    padding: 16px;
+    border-top: 1px solid var(--border-color);
+}
+
+.user-profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    background: var(--surface-muted);
+    border-radius: 10px;
+}
+
+.avatar {
+    font-size: 2.2rem;
+    color: var(--text-muted);
+}
+
+.user-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.username {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.role {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* Main Workspace */
+.main-content {
+    flex-grow: 1;
+    background-color: var(--bg-main);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* Top Bar */
+.top-bar {
+    height: 70px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 32px;
+    background-color: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(12px);
+    z-index: 10;
+}
+
+.search-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface-muted);
+    border: 1px solid transparent;
+    border-radius: 12px;
+    padding: 9px 16px;
+    width: 320px;
+    transition: all 0.25s ease;
+}
+
+.search-bar:focus-within {
+    border-color: var(--accent-indigo);
+    background: #ffffff;
+    box-shadow: 0 0 0 3px var(--accent-indigo-glow);
+    width: 380px;
+}
+
+.search-bar i {
+    color: var(--text-muted);
+}
+
+.search-bar input {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    width: 100%;
+}
+
+.search-bar input::placeholder {
+    color: var(--text-muted);
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.status-indicator-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--accent-emerald-glow);
+    border: 1px solid rgba(15, 157, 118, 0.18);
+    border-radius: 20px;
+    padding: 6px 14px;
+}
+
+.pulse-dot {
+    width: 8px;
+    height: 8px;
+    background-color: var(--accent-emerald);
+    border-radius: 50%;
+    box-shadow: 0 0 0 0 rgba(15, 157, 118, 0.5);
+    animation: pulse 1.8s infinite;
+}
+
+@keyframes pulse {
+    0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(15, 157, 118, 0.4);
+    }
+    70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 6px rgba(15, 157, 118, 0);
+    }
+    100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(15, 157, 118, 0);
+    }
+}
+
+.status-text {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--accent-emerald);
+}
+
+.icon-btn {
+    width: 40px;
+    height: 40px;
+    background: #ffffff;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    transition: all 0.2s ease;
+}
+
+.icon-btn:hover {
+    color: var(--accent-indigo);
+    background: var(--surface-muted);
+    border-color: var(--border-hover);
+}
+
+/* Content Body */
+.content-body {
+    padding: 32px;
+    overflow-y: auto;
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Card — white paper surface */
+.glass-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.glass-card:hover {
+    border-color: var(--border-hover);
+    box-shadow: var(--shadow-md);
+}
+
+.glass-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: transparent;
+    transition: background 0.3s ease;
+}
+
+.glass-card.card-indigo::before { background: var(--accent-indigo); }
+.glass-card.card-emerald::before { background: var(--accent-emerald); }
+.glass-card.card-amber::before { background: var(--accent-amber); }
+.glass-card.card-rose::before { background: var(--accent-rose); }
+
+/* Primary button */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: var(--accent-indigo);
+    color: #ffffff;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 2px rgba(79, 70, 229, 0.25);
+}
+
+.btn:hover {
+    background: #4338ca;
+    box-shadow: 0 4px 12px rgba(79, 70, 229, 0.28);
+}
+
+.btn-secondary {
+    background: #ffffff;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    box-shadow: none;
+}
+
+.btn-secondary:hover {
+    background: var(--surface-muted);
+    border-color: var(--border-hover);
+    box-shadow: none;
+}
+
+/* Typography helper */
+h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+/* Subtle, refined scrollbars for the light theme */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #d5d9df;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #c0c6cf;
+    background-clip: content-box;
+}

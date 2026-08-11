@@ -1,0 +1,15 @@
+Flask
+python-dotenv
+PyYAML
+google-generativeai
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+playwright
+beautifulsoup4
+pydantic
+requests
+pypdf
+openpyxl
+

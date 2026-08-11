@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}CMR Automation Hub{% endblock %}</title>
+    <!-- Google Fonts: Outfit & Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Base styling -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    {% block extra_css %}{% endblock %}
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-plane-departure"></i>
+                </div>
+                <span class="brand-name">CMR Process Hub</span>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="/cmr-process" class="nav-item {% if selected_label == 'a-cmr' or not selected_label %}active{% endif %}" id="nav-cmr">
+                    <i class="fa-solid fa-file-contract"></i>
+                    <span>CMR Process</span>
+                </a>
+                <a href="/lcl-arrivals" class="nav-item {% if selected_label == 'lcl-arrivals---release' %}active{% endif %}" id="nav-lcl-arrivals">
+                    <i class="fa-solid fa-boxes-packing"></i>
+                    <span>LCL Arrivals / Release</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="user-profile">
+                    <div class="avatar">
+                        <i class="fa-solid fa-circle-user"></i>
+                    </div>
+                    <div class="user-info">
+                        <span class="username">Deepak Indrakumar</span>
+                        <span class="role">Administrator</span>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Workspace Area -->
+        <main class="main-content">
+            <header class="top-bar">
+                <div class="search-bar">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input type="text" placeholder="Search tracking numbers, files, logs...">
+                </div>
+                <div class="header-actions">
+                    <button id="classify-all-btn" onclick="classifyAllDocuments()"
+                        title="Identify the document type of every mail in the label"
+                        style="width:auto; padding:9px 18px; background:#0f9d76; color:#fff; border:none; border-radius:10px; font-size:0.85rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:8px; box-shadow:0 1px 2px rgba(15,157,118,0.25);">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Find Document Types
+                    </button>
+                    <button onclick="viewClassificationHistory()"
+                        title="See (and clear) already-found document types for this label"
+                        style="width:auto; padding:9px 18px; background:#fff; color:#3730a3; border:1px solid #c7d2fe; border-radius:10px; font-size:0.85rem; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:8px;">
+                        <i class="fa-solid fa-clock-rotate-left"></i> History
+                    </button>
+                    <div class="status-indicator-badge">
+                        <span class="pulse-dot"></span>
+                        <span class="status-text">System Live</span>
+                    </div>
+                    <button class="icon-btn" title="Notifications">
+                        <i class="fa-regular fa-bell"></i>
+                    </button>
+                    <button class="icon-btn" title="Settings">
+                        <i class="fa-solid fa-sliders"></i>
+                    </button>
+                </div>
+            </header>
+
+            <div class="content-body">
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+
+    {% block extra_js %}{% endblock %}
+</body>
+
+</html>

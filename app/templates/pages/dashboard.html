@@ -1,0 +1,3809 @@
+{% extends "base/base.html" %}
+
+{% block title %}CMR Process - Dashboard{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Tab Navigation */
+    .tab-navigation {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 24px;
+        border-bottom: 1px solid var(--border-color);
+        padding-bottom: 8px;
+    }
+
+    .tab-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-secondary);
+        font-family: var(--font-display);
+        font-size: 1.05rem;
+        font-weight: 600;
+        padding: 10px 20px;
+        cursor: pointer;
+        border-radius: 8px;
+        transition: all 0.25s ease;
+        position: relative;
+    }
+
+    .tab-btn:hover {
+        color: var(--text-primary);
+        background: var(--surface-muted);
+    }
+
+    .tab-btn.active {
+        color: var(--accent-indigo);
+        background: rgba(99, 102, 241, 0.08);
+    }
+
+    .tab-btn.active::after {
+        content: '';
+        position: absolute;
+        bottom: -9px;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background-color: var(--accent-indigo);
+    }
+
+    .tab-content {
+        display: none;
+        animation: fadeIn 0.3s ease;
+        flex: 1 1 0;
+        min-height: 0;
+        flex-direction: column;
+    }
+
+    .tab-content.active {
+        display: flex;
+        flex-direction: column;
+    }
+
+    @keyframes fadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(4px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    /* Gmail-style workspace: a real mail app reads on white, regardless of the
+       dashboard's dark theme, so this whole panel is a light "paper" surface. */
+    .gmail-workspace {
+        background: #ffffff;
+        border: 1px solid #dadce0;
+        border-radius: 16px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        box-shadow: var(--shadow-lg);
+        color: #202124;
+        height: calc(100vh - 220px);
+        min-height: 500px;
+    }
+
+    .gmail-header-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 16px;
+        border-bottom: 1px solid #e8eaed;
+        background: #ffffff;
+    }
+
+    .gmail-actions-left {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #5f6368;
+    }
+
+    .mail-count-badge {
+        font-size: 0.82rem;
+        color: #5f6368;
+        font-weight: 500;
+    }
+
+    .gmail-action-btn {
+        background: transparent;
+        border: none;
+        color: #5f6368;
+        font-size: 1rem;
+        cursor: pointer;
+        padding: 8px;
+        border-radius: 50%;
+        transition: background 0.15s, color 0.15s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+    }
+
+    .gmail-action-btn:hover {
+        color: #202124;
+        background: #f1f3f4;
+    }
+
+    .gmail-action-btn.danger:hover {
+        color: #d93025;
+        background: #fce8e6;
+    }
+
+    .gmail-list-container {
+        flex: 1 1 0;
+        overflow-y: auto;
+        background: #ffffff;
+        min-height: 0;
+    }
+
+    .gmail-row {
+        display: flex;
+        align-items: center;
+        padding: 10px 16px;
+        border-bottom: 1px solid #f1f3f4;
+        cursor: pointer;
+        transition: box-shadow 0.1s;
+        background: #ffffff;
+        position: relative;
+    }
+
+    .gmail-row.read {
+        background: #f9fafb;
+    }
+
+    .gmail-row:hover {
+        box-shadow: inset 1px 0 0 #dadce0, inset -1px 0 0 #dadce0, 0 1px 2px 0 rgba(60, 64, 67, 0.3);
+        z-index: 1;
+    }
+
+    .gmail-row.selected {
+        background: #e8f0fe;
+    }
+
+    .gmail-col-select {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 56px;
+        flex-shrink: 0;
+        color: #5f6368;
+    }
+
+    .gmail-col-select input[type="checkbox"] {
+        cursor: pointer;
+        accent-color: var(--accent-indigo);
+    }
+
+    .gmail-star {
+        cursor: pointer;
+        transition: color 0.15s;
+        font-size: 1.05rem;
+        color: #b0b0b0;
+    }
+
+    .gmail-star:hover {
+        color: #5f6368;
+    }
+
+    .gmail-star.starred {
+        color: #f4b400;
+    }
+
+    .gmail-star.starred:hover {
+        color: #e0a600;
+    }
+
+    /* Star color reflects whatever color is actually set in Gmail (scraped live) -
+       so e.g. the blue star the Shypple automation sets for "no organization" emails
+       is visually distinct from a plain yellow star here too. */
+    .gmail-star.star-color-yellow {
+        color: #f4b400;
+    }
+
+    .gmail-star.star-color-yellow:hover {
+        color: #e0a600;
+    }
+
+    .gmail-star.star-color-blue {
+        color: #4285f4;
+    }
+
+    .gmail-star.star-color-blue:hover {
+        color: #3367d6;
+    }
+
+    .gmail-star.star-color-red {
+        color: #ea4335;
+    }
+
+    .gmail-star.star-color-red:hover {
+        color: #c5221f;
+    }
+
+    .gmail-star.star-color-orange {
+        color: #ff8c00;
+    }
+
+    .gmail-star.star-color-orange:hover {
+        color: #e07b00;
+    }
+
+    .gmail-star.star-color-purple {
+        color: #a142f4;
+    }
+
+    .gmail-star.star-color-purple:hover {
+        color: #8c30db;
+    }
+
+    .gmail-star.star-color-green {
+        color: #34a853;
+    }
+
+    .gmail-star.star-color-green:hover {
+        color: #2a8644;
+    }
+
+    .gmail-col-sender {
+        width: 180px;
+        flex-shrink: 0;
+        font-weight: 400;
+        font-size: 0.88rem;
+        color: #202124;
+        padding-right: 16px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        overflow: hidden;
+    }
+
+    .gmail-row.unread .gmail-col-sender,
+    .gmail-row.unread .gmail-subject {
+        font-weight: 700;
+    }
+
+    .gmail-col-content {
+        flex-grow: 1;
+        min-width: 0;
+        padding-right: 16px;
+        font-size: 0.87rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        overflow: hidden;
+    }
+
+    .gmail-subject {
+        color: #202124;
+        font-weight: 400;
+    }
+
+    .gmail-attachment-icon {
+        color: #5f6368;
+        font-size: 0.8rem;
+        margin-right: 6px;
+    }
+
+    .gmail-separator {
+        color: #80868b;
+        margin: 0 4px;
+    }
+
+    .gmail-snippet {
+        color: #5f6368;
+        font-weight: 400;
+    }
+
+    .gmail-col-date {
+        width: 90px;
+        flex-shrink: 0;
+        text-align: right;
+        font-size: 0.78rem;
+        color: #5f6368;
+        font-weight: 400;
+    }
+
+    .gmail-row.unread .gmail-col-date {
+        font-weight: 700;
+        color: #202124;
+    }
+
+    /* Quick-action icons that replace the date column on hover, like Gmail */
+    .gmail-row-actions {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        margin-left: auto;
+        flex-shrink: 0;
+    }
+
+    .gmail-row:hover .gmail-row-actions {
+        display: flex;
+    }
+
+    .gmail-row:hover .gmail-col-date {
+        display: none;
+    }
+
+    .gmail-row-action-btn {
+        background: transparent;
+        border: none;
+        color: #5f6368;
+        cursor: pointer;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.9rem;
+        transition: background 0.15s, color 0.15s;
+    }
+
+    .gmail-row-action-btn:hover {
+        background: #e8eaed;
+        color: #202124;
+    }
+
+    .gmail-row-action-btn.danger:hover {
+        color: #d93025;
+        background: #fce8e6;
+    }
+
+    /* Reader Layout */
+    .gmail-reader-actions {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        border-bottom: 1px solid #e8eaed;
+        background: #ffffff;
+        gap: 2px;
+    }
+
+    .gmail-back-btn {
+        background: transparent;
+        border: none;
+        color: #5f6368;
+        padding: 8px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 36px;
+        height: 36px;
+        font-size: 0.95rem;
+        transition: background 0.15s, color 0.15s;
+    }
+
+    .gmail-back-btn:hover {
+        background: #f1f3f4;
+        color: #202124;
+    }
+
+    .gmail-back-btn.danger:hover {
+        color: #d93025;
+        background: #fce8e6;
+    }
+
+    .gmail-back-btn.text-btn {
+        width: auto;
+        border-radius: 6px;
+        padding: 8px 16px;
+        gap: 8px;
+        font-size: 0.88rem;
+        font-weight: 500;
+    }
+
+    .gmail-toolbar-divider {
+        width: 1px;
+        height: 24px;
+        background: #e8eaed;
+        margin: 0 8px;
+    }
+
+    .gmail-reader-content {
+        padding: 24px;
+        overflow-y: auto;
+        flex: 1 1 0;
+        min-height: 0;
+        background: #ffffff;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .reader-header {
+        border-bottom: 1px solid #e8eaed;
+        padding-bottom: 16px;
+        margin-bottom: 24px;
+    }
+
+    .reader-subject-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+    }
+
+    .reader-subject {
+        font-size: 1.4rem;
+        font-family: var(--font-display);
+        color: #202124;
+        font-weight: 500;
+        flex-grow: 1;
+    }
+
+    .reader-star {
+        cursor: pointer;
+        font-size: 1.25rem;
+        color: #b0b0b0;
+        transition: color 0.15s;
+    }
+
+    .reader-star.starred {
+        color: #f4b400;
+    }
+
+    .reader-meta-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .reader-sender-info {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .reader-avatar {
+        width: 36px;
+        height: 36px;
+        background: rgba(99, 102, 241, 0.15);
+        color: var(--accent-indigo);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        font-size: 0.95rem;
+    }
+
+    .reader-sender-details {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .reader-sender-name {
+        font-weight: 600;
+        font-size: 0.95rem;
+        color: #202124;
+    }
+
+    .reader-sender-email {
+        font-size: 0.8rem;
+        color: #5f6368;
+    }
+
+    .reader-date {
+        font-size: 0.8rem;
+        color: #5f6368;
+    }
+
+    .reader-body {
+        font-size: 0.95rem;
+        color: #202124;
+        line-height: 1.6;
+    }
+
+    /* Email HTML content is rendered on a white "paper" surface, like Gmail/Outlook's
+       reading pane, since sender HTML assumes a light background and dark text. */
+    .email-html-content {
+        background: #ffffff;
+        color: #202124;
+        border-radius: 8px;
+        overflow-x: auto;
+        word-wrap: break-word;
+    }
+
+    .email-html-content img {
+        max-width: 100%;
+        height: auto;
+    }
+
+    .email-html-content table {
+        max-width: 100%;
+    }
+
+    .email-html-content a {
+        color: #1a73e8;
+    }
+
+    .email-attachments-bar {
+        margin-top: 20px;
+        padding-top: 16px;
+        border-top: 1px solid #e8eaed;
+    }
+
+    .email-attachments-title {
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #5f6368;
+        margin-bottom: 12px;
+    }
+
+    .attachment-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        margin: 0 10px 10px 0;
+        border: 1px solid #dadce0;
+        border-radius: 8px;
+        background: #f8f9fa;
+        color: #202124;
+        text-decoration: none;
+        font-size: 0.85rem;
+        font-weight: 500;
+        transition: background 0.15s, border-color 0.15s;
+    }
+
+    .attachment-chip:hover {
+        background: #e8f0fe;
+        border-color: #1a73e8;
+    }
+
+    .attachment-chip i {
+        font-size: 1.1rem;
+        color: #1a73e8;
+    }
+
+    .attachment-chip .attachment-size {
+        color: #5f6368;
+        font-weight: 400;
+        font-size: 0.78rem;
+    }
+
+    /* Document type classification */
+    .email-doctypes-bar {
+        margin-top: 20px;
+        padding: 14px 16px;
+        border: 1px solid #dadce0;
+        border-radius: 10px;
+        background: #f8f9fa;
+    }
+
+    .email-doctypes-title {
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #5f6368;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .doctype-summary {
+        font-size: 0.9rem;
+        color: #202124;
+        margin-bottom: 10px;
+    }
+
+    .doctype-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 0;
+        font-size: 0.85rem;
+        color: #3c4043;
+        border-top: 1px dashed #e8eaed;
+    }
+
+    .doctype-row .doctype-source {
+        color: #5f6368;
+        min-width: 130px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .doctype-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        border-radius: 999px;
+        background: #e8f0fe;
+        color: #1967d2;
+        border: 1px solid #d2e3fc;
+        font-size: 0.8rem;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+
+    .doctype-badge.is-other {
+        background: #f1f3f4;
+        color: #5f6368;
+        border-color: #dadce0;
+    }
+
+    .doctype-conf {
+        color: #80868b;
+        font-size: 0.75rem;
+        font-weight: 500;
+    }
+
+    .doctype-error {
+        color: #c5221f;
+        font-size: 0.85rem;
+    }
+
+    .doctype-pages {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: #eef2ff;
+        color: #4338ca;
+        font-size: 0.7rem;
+        font-weight: 600;
+    }
+
+    /* Container-number (ISO 6346) chips */
+    .container-chips {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        margin-left: 6px;
+        color: #92400e;
+    }
+
+    .container-chips>i {
+        font-size: 0.72rem;
+        margin-right: 2px;
+    }
+
+    .container-chip {
+        padding: 1px 7px;
+        border-radius: 6px;
+        background: #fef3c7;
+        color: #92400e;
+        border: 1px solid #fde68a;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        font-family: var(--font-mono, monospace);
+    }
+
+    .doctype-containers {
+        margin-top: 6px;
+        font-size: 0.78rem;
+        color: var(--text-secondary);
+    }
+
+    .doctype-rowright {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: flex-end;
+    }
+
+    .dt-containers {
+        margin-top: 4px;
+    }
+
+    /* Inline document-type badge on each mail row */
+    .row-doctype-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        margin-right: 8px;
+        border-radius: 6px;
+        background: #e8f0fe;
+        color: #1967d2;
+        border: 1px solid #d2e3fc;
+        font-size: 0.72rem;
+        font-weight: 700;
+        white-space: nowrap;
+        vertical-align: middle;
+    }
+
+    .row-doctype-badge.is-other {
+        background: #f1f3f4;
+        color: #5f6368;
+        border-color: #dadce0;
+    }
+
+    .clickable-doc-badge {
+        cursor: pointer;
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .clickable-doc-badge:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+        filter: brightness(0.96);
+    }
+
+    /* Wrapper for a mail that carries several document types (multi-attachment mails) */
+    .row-doctype-badges {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-right: 8px;
+        max-width: 46%;
+        vertical-align: middle;
+    }
+
+    .row-doctype-badges .row-doctype-badge {
+        margin-right: 0;
+    }
+
+    .row-doctype-count {
+        opacity: 0.75;
+        font-weight: 800;
+    }
+
+    /* Wrapper for the container-number chips painted on each mail row, right after the
+       doc-type badges - same .container-chips look used in the reader/modal views. */
+    .row-container-chips {
+        vertical-align: middle;
+        margin-right: 8px;
+    }
+
+    /* Classify-all results modal */
+    .doctypes-modal-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 1100;
+        background: rgba(31, 36, 48, 0.45);
+        backdrop-filter: blur(4px);
+        align-items: center;
+        justify-content: center;
+    }
+
+    .doctypes-modal {
+        width: min(920px, 94vw);
+        max-height: 86vh;
+        background: #ffffff;
+        border-radius: 16px;
+        box-shadow: var(--shadow-lg);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .doctypes-modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 18px 22px;
+        border-bottom: 1px solid #e8eaed;
+    }
+
+    .doctypes-modal-head h3 {
+        margin: 0;
+        color: #1f2430;
+    }
+
+    .doctypes-summary-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        padding: 14px 22px;
+        border-bottom: 1px solid #f0f1f3;
+    }
+
+    .summary-chip {
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #3c4043;
+        background: #f3f4f6;
+        border: 1px solid #e6e8eb;
+        border-radius: 999px;
+        padding: 4px 12px;
+    }
+
+    .summary-chip b {
+        color: #0f9d76;
+        margin-left: 4px;
+    }
+
+    .doctypes-table-wrap {
+        overflow-y: auto;
+        padding: 8px 22px 22px;
+    }
+
+    .doctypes-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.86rem;
+    }
+
+    .doctypes-table th {
+        text-align: left;
+        color: #5f6368;
+        font-weight: 600;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 10px 10px;
+        border-bottom: 1px solid #e8eaed;
+        position: sticky;
+        top: 0;
+        background: #ffffff;
+    }
+
+    .doctypes-table td {
+        padding: 10px 10px;
+        border-bottom: 1px solid #f2f3f5;
+        color: #202124;
+        vertical-align: top;
+    }
+
+    .doctypes-table tr:hover td {
+        background: #f8f9fa;
+    }
+
+    .dt-sender {
+        color: #5f6368;
+        white-space: nowrap;
+    }
+
+    .dt-subject {
+        color: #202124;
+    }
+
+    .dt-conf {
+        color: #80868b;
+        font-size: 0.78rem;
+        white-space: nowrap;
+    }
+
+    /* Tab 2 Layout */
+    .process-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        padding: 48px;
+        text-align: center;
+        box-shadow: var(--shadow-md);
+    }
+
+    .process-banner {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 10px 16px;
+        padding: 14px 18px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        font-size: 0.9rem;
+    }
+
+    /* The message itself: a flexible, wrappable text run (as opposed to an
+       unconstrained flex item) - without this, a single long unbroken token (e.g. a
+       real attachment filename) forces the whole banner - icon, text AND the confirm
+       button - wider than the viewport instead of wrapping onto multiple lines. */
+    .process-banner-text {
+        flex: 1 1 260px;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .process-banner .btn {
+        flex-shrink: 0;
+    }
+
+    .process-banner-warn {
+        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid var(--accent-amber, #f59e0b);
+        color: var(--text-primary);
+    }
+
+    .process-banner-error {
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid #ef4444;
+        color: var(--text-primary);
+    }
+
+    /* Field-by-field diff table shown in the "needs upload" banner when the deep
+       comparison found the email's copy and Shypple's existing copy genuinely
+       differ - lets the operator see exactly what differs before approving. */
+    .upload-diff-block {
+        margin-top: 6px;
+        padding-top: 10px;
+        border-top: 1px dashed rgba(0, 0, 0, 0.15);
+        width: 100%;
+    }
+
+    .upload-diff-title {
+        font-weight: 600;
+        font-size: 0.82rem;
+        margin-bottom: 6px;
+    }
+
+    .upload-diff-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8rem;
+        background: rgba(255, 255, 255, 0.5);
+    }
+
+    .upload-diff-table th,
+    .upload-diff-table td {
+        text-align: left;
+        padding: 4px 8px;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+    }
+
+    .upload-diff-table th {
+        background: rgba(0, 0, 0, 0.05);
+        font-weight: 600;
+    }
+
+    .process-summary {
+        font-weight: 600;
+        margin-bottom: 16px;
+        color: var(--text-primary);
+    }
+
+    .process-job-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .process-job-row {
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        padding: 12px 16px;
+    }
+
+    .process-job-main {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .process-job-subject {
+        font-weight: 500;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .process-job-details {
+        margin-top: 6px;
+        font-size: 0.82rem;
+        color: var(--text-secondary);
+    }
+
+    .job-download-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-right: 10px;
+        color: var(--accent-indigo, #4f46e5);
+        text-decoration: none;
+    }
+
+    .job-download-link:hover {
+        text-decoration: underline;
+    }
+
+    .job-download-group {
+        display: inline-flex;
+        align-items: center;
+        margin-right: 10px;
+    }
+
+    .job-download-group .job-download-link {
+        margin-right: 6px;
+    }
+
+    .job-badge {
+        font-size: 0.78rem;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 20px;
+        white-space: nowrap;
+    }
+
+    .job-badge-pending {
+        background: var(--border-color);
+        color: var(--text-secondary);
+    }
+
+    .job-badge-ok {
+        background: rgba(16, 185, 129, 0.15);
+        color: #0f9d76;
+    }
+
+    .job-badge-warn {
+        background: rgba(245, 158, 11, 0.15);
+        color: #b45309;
+    }
+
+    .job-badge-fail {
+        background: rgba(239, 68, 68, 0.15);
+        color: #dc2626;
+    }
+
+    .process-review-line {
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        margin-top: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+
+    .process-review-empty {
+        font-style: italic;
+        color: var(--text-muted);
+    }
+
+    .process-review-errors {
+        margin-top: 14px;
+        font-size: 0.85rem;
+        color: #b45309;
+    }
+
+    .process-review-actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 20px;
+    }
+
+    .doctype-override-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #f8f9fa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        padding: 2px 8px 2px 10px;
+    }
+
+    .doctype-override-label {
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+
+    .doctype-override-select {
+        font-size: 0.78rem;
+        border: 1px solid #d2e3fc;
+        border-radius: 5px;
+        padding: 3px 6px;
+        background: #fff;
+        color: #1967d2;
+        font-weight: 600;
+        max-width: 220px;
+    }
+
+    .process-review-source-note {
+        margin-top: 12px;
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+
+    .process-review-source-note a {
+        color: #1967d2;
+        text-decoration: none;
+        font-weight: 600;
+        margin-left: 4px;
+    }
+
+    .process-review-source-note a:hover {
+        text-decoration: underline;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Google Consent Warning Banner if disconnected -->
+{% if oauth_configured and not token_present %}
+<div class="glass-card card-amber"
+    style="margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap;">
+    <div>
+        <h3 style="color: var(--accent-amber); margin-bottom: 4px;"><i class="fa-solid fa-triangle-exclamation"></i>
+            Google Account Connection Required</h3>
+        <p style="color: var(--text-secondary); font-size: 0.9rem;">To access the Gmail inbox viewer, please authorize
+            access to your Google Account.</p>
+    </div>
+    <div>
+        <a href="/login/google" class="btn"
+            style="display: inline-block; width: auto; padding: 10px 24px; text-decoration: none; text-align: center; border-radius: 8px;">Connect
+            Google Account</a>
+    </div>
+</div>
+{% endif %}
+
+<!-- Tabs Navigation -->
+<div class="tab-navigation">
+    <button class="tab-btn active" onclick="switchTab(event, 'inbox-tab')">
+        <i class="fa-solid fa-inbox" style="margin-right: 6px;"></i> Gmail Inbox
+    </button>
+    <button class="tab-btn" onclick="switchTab(event, 'process-tab')">
+        <i class="fa-solid fa-gear" style="margin-right: 6px;"></i> Operations Process
+    </button>
+</div>
+
+<!-- Tab 1: Gmail Inbox Content -->
+<div id="inbox-tab" class="tab-content active">
+    {% if token_present %}
+    <!-- Control Panel for Gmail and Automation -->
+    <div class="glass-card"
+        style="margin-bottom: 24px; padding: 20px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; flex-shrink: 0;">
+        <div style="display: flex; align-items: center; gap: 16px;">
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+                <label
+                    style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Gmail
+                    Shortcut / Label Name</label>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="label-input" value="{{ selected_label }}" placeholder="e.g. a-cmr"
+                        style="background: var(--surface-muted); border: 1px solid var(--border-color); color: var(--text-primary); padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; min-width: 240px;">
+                    <button class="btn btn-secondary" onclick="updateLabel()">
+                        <i class="fa-solid fa-filter"></i> Apply
+                    </button>
+                    <button class="btn" onclick="openComposeModal()">
+                        <i class="fa-solid fa-pen"></i> Compose
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="gmail-workspace">
+        <!-- View 1: Mail List View -->
+        <div id="mail-list-view" style="display: flex; flex-direction: column; flex: 1 1 0; min-height: 0;">
+            <div class="gmail-header-bar">
+                <div class="gmail-actions-left">
+                    <input type="checkbox" id="select-all-checkbox"
+                        style="cursor: pointer; accent-color: var(--accent-indigo);" onchange="toggleSelectAll(this)">
+                    <button class="gmail-action-btn" onclick="fetchEmailsLive(true)" title="Fetch Live Mails">
+                        <i class="fa-solid fa-rotate-right"></i>
+                    </button>
+                    <button class="btn btn-secondary" onclick="fetchEmailsLive(true)" style="padding: 6px 14px; font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">
+                        <i class="fa-solid fa-arrows-rotate"></i> Update Live
+                    </button>
+                    <button class="gmail-action-btn" title="More">
+                        <i class="fa-solid fa-ellipsis-vertical"></i>
+                    </button>
+                    <button class="btn" id="process-selected-btn" onclick="processSelectedMails()" disabled
+                        style="width: auto; padding: 8px 18px; opacity: 0.5; display: flex; align-items: center; gap: 8px;">
+                        <i class="fa-solid fa-gear"></i> Process<span id="process-selected-count"></span>
+                    </button>
+                </div>
+                <div>
+                    <span class="mail-count-badge">{{ recent_emails|length }} messages</span>
+                </div>
+            </div>
+
+            <div id="scraper-status-banner" style="display:none; flex-shrink:0; padding:8px 16px; font-size:0.82rem; background:#fef3c7; color:#92400e; border-bottom:1px solid #fde68a;"></div>
+
+            <div class="gmail-list-container mail-items-container">
+                {% if recent_emails %}
+                {% for email in recent_emails %}
+                <div class="gmail-row {{ 'unread' if email.unread else 'read' }}" id="mail-{{ email.id }}"
+                    data-id="{{ email.id }}" data-from="{{ email.from|escape }}"
+                    data-subject="{{ email.subject|escape }}" data-date="{{ email.date|escape }}"
+                    data-snippet="{{ email.snippet|escape }}" data-unread="{{ 'true' if email.unread else 'false' }}"
+                    data-starred="{{ 'true' if email.starred else 'false' }}"
+                    data-star-color="{{ email.starColor or '' }}" onclick="selectMail(this)">
+                    <div class="gmail-col-select" onclick="event.stopPropagation();">
+                        <input type="checkbox" class="mail-select-checkbox"
+                            onchange="toggleMailSelection(this.closest('.gmail-row'), this.checked)">
+                        <i class="{{ 'fa-solid' if email.starred else 'fa-regular' }} fa-star gmail-star {{ 'starred' if email.starred else '' }} {{ 'star-color-' + email.starColor if email.starColor else '' }}"
+                            title="{{ email.starColor + ' star' if email.starColor else '' }}"
+                            onclick="toggleStarAction(event, this.closest('.gmail-row'))"></i>
+                    </div>
+                    <div class="gmail-col-sender">{{ email.from }}</div>
+                    <div class="gmail-col-content">
+                        {% if email.hasAttachment %}<i class="fa-solid fa-paperclip gmail-attachment-icon"></i>{% endif
+                        %}
+                        <span class="gmail-subject">{{ email.subject }}</span>
+                        <span class="gmail-separator">—</span>
+                        <span class="gmail-snippet">{{ email.snippet }}</span>
+                    </div>
+                    <div class="gmail-col-date">{{ email.date.split(',')[1] if ',' in email.date else email.date }}
+                    </div>
+                    <div class="gmail-row-actions" onclick="event.stopPropagation();">
+                        <button class="gmail-row-action-btn" title="Archive"
+                            onclick="archiveRowAction(this.closest('.gmail-row'))"><i
+                                class="fa-solid fa-box-archive"></i></button>
+                        <button class="gmail-row-action-btn danger" title="Delete"
+                            onclick="deleteRowAction(this.closest('.gmail-row'))"><i
+                                class="fa-solid fa-trash"></i></button>
+                        <button class="gmail-row-action-btn" title="Mark as read/unread"
+                            onclick="toggleReadRowAction(this.closest('.gmail-row'))"><i
+                                class="fa-solid fa-envelope{{ '-open' if email.unread else '' }}"></i></button>
+                    </div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <div style="text-align: center; color: var(--text-muted); padding: 60px 16px;">
+                    No messages found.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- View 2: Mail Reader View -->
+        <div id="mail-reader-view" style="display: none; flex-direction: column; flex: 1 1 0; min-height: 0;">
+            <div class="gmail-reader-actions">
+                <button class="gmail-back-btn text-btn" onclick="backToList()">
+                    <i class="fa-solid fa-arrow-left"></i> Back to Inbox
+                </button>
+                <div class="gmail-toolbar-divider"></div>
+                <button class="gmail-back-btn" title="Archive" onclick="archiveReaderAction()">
+                    <i class="fa-solid fa-box-archive"></i>
+                </button>
+                <button class="gmail-back-btn danger" title="Delete" onclick="deleteReaderAction()">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+                <button class="gmail-back-btn" title="Mark as unread" onclick="markAsUnreadAction()">
+                    <i class="fa-regular fa-envelope"></i>
+                </button>
+                <div style="margin-left: auto;"></div>
+                <button class="gmail-back-btn text-btn" id="deep-analyze-btn" onclick="deepAnalyzeCurrent()"
+                    title="Read the actual document(s) - every page - to identify the document type(s)"
+                    style="color:#0f9d76;">
+                    <i class="fa-solid fa-file-magnifying-glass"></i> Deep analyze
+                </button>
+                <button class="gmail-back-btn text-btn" onclick="openReplyModal()">
+                    <i class="fa-solid fa-reply"></i> Reply
+                </button>
+            </div>
+            <div class="gmail-reader-content">
+                <div class="reader-header">
+                    <div class="reader-subject-row">
+                        <div class="reader-subject" id="read-subject">Subject</div>
+                        <i class="fa-regular fa-star reader-star" id="read-star" onclick="toggleStarReaderAction()"></i>
+                    </div>
+                    <div class="reader-meta-row">
+                        <div class="reader-sender-info">
+                            <div class="reader-avatar" id="read-avatar">?</div>
+                            <div class="reader-sender-details">
+                                <span class="reader-sender-name" id="read-sender-name">Sender Name</span>
+                                <span class="reader-sender-email" id="read-sender-email">sender@email.com</span>
+                            </div>
+                        </div>
+                        <span class="reader-date" id="read-date">Date</span>
+                    </div>
+                </div>
+                <div class="reader-body" id="read-body">
+                    <div id="body-loader"
+                        style="display: none; text-align: center; padding: 48px; color: var(--text-secondary);">
+                        <i class="fa-solid fa-spinner fa-spin"
+                            style="font-size: 2rem; margin-bottom: 12px; color: var(--accent-indigo);"></i>
+                        <p>Loading full email message...</p>
+                    </div>
+                    <div id="email-html-content" class="email-html-content" style="display: none;"></div>
+                    <div id="email-doctypes" class="email-doctypes-bar" style="display: none;">
+                        <div class="email-doctypes-title"><i class="fa-solid fa-tags"></i> Document type identification
+                        </div>
+                        <div id="email-doctype-summary" class="doctype-summary"></div>
+                        <div id="email-doctype-list"></div>
+                    </div>
+                    <div id="email-attachments" class="email-attachments-bar" style="display: none;">
+                        <div class="email-attachments-title"><i class="fa-solid fa-paperclip"></i> Documents /
+                            Attachments</div>
+                        <div id="email-attachments-list"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="glass-card" style="text-align: center; padding: 60px 24px; max-width: 500px; margin: 40px auto;">
+        <i class="fa-solid fa-shield-halved"
+            style="font-size: 3rem; margin-bottom: 20px; color: var(--accent-amber)"></i>
+        <h3 style="margin-bottom: 12px; font-weight: 600;">Google Authorization Required</h3>
+        <p style="color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 24px;">Please sign in with your
+            corporate Google Account to view your emails in a professional mailbox client view.</p>
+        <a href="/login/google" class="btn"
+            style="display: inline-block; width: auto; padding: 12px 30px; text-decoration: none;">Connect Google ID</a>
+    </div>
+    {% endif %}
+    <!-- Compose / Reply Modal -->
+    <div id="email-modal"
+        style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); align-items: center; justify-content: center; backdrop-filter: blur(4px);">
+        <div class="glass-card"
+            style="width: 500px; padding: 24px; display: flex; flex-direction: column; gap: 16px; border: 1px solid var(--border-color); background: #ffffff;">
+            <div
+                style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
+                <h3 id="modal-title"
+                    style="color: var(--text-primary); font-family: var(--font-display); font-weight: bold; margin: 0;">
+                    New Message</h3>
+                <button onclick="closeEmailModal()"
+                    style="background: transparent; border: none; color: var(--text-secondary); cursor: pointer; font-size: 1.2rem;"><i
+                        class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+                <label style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 600;">To</label>
+                <input type="email" id="modal-to" placeholder="recipients@email.com"
+                    style="background: var(--surface-muted); border: 1px solid var(--border-color); color: var(--text-primary); padding: 10px; border-radius: 8px; font-size: 0.95rem;">
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+                <label style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 600;">Subject</label>
+                <input type="text" id="modal-subject" placeholder="Subject"
+                    style="background: var(--surface-muted); border: 1px solid var(--border-color); color: var(--text-primary); padding: 10px; border-radius: 8px; font-size: 0.95rem;">
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+                <label style="font-size: 0.8rem; color: var(--text-secondary); font-weight: 600;">Message</label>
+                <textarea id="modal-body" rows="8" placeholder="Type your message here..."
+                    style="background: var(--surface-muted); border: 1px solid var(--border-color); color: var(--text-primary); padding: 10px; border-radius: 8px; font-size: 0.95rem; resize: none; font-family: var(--font-sans);"></textarea>
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 8px;">
+                <button onclick="closeEmailModal()" class="gmail-back-btn">Cancel</button>
+                <button onclick="sendEmailAction()"
+                    style="background: var(--accent-indigo); color: white; border: none; padding: 10px 24px; border-radius: 8px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 8px; transition: all 0.2s;">
+                    <i class="fa-solid fa-paper-plane"></i> Send
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Document-type results modal (populated by "Find Document Types") -->
+    <div id="doctypes-modal" class="doctypes-modal-overlay">
+        <div class="doctypes-modal">
+            <div class="doctypes-modal-head">
+                <h3><i class="fa-solid fa-wand-magic-sparkles" style="color:#0f9d76;"></i> Document Types — All Mails in
+                    Label</h3>
+                <button class="gmail-action-btn" onclick="closeDocTypesModal()" title="Close"><i
+                        class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="doctypes-summary" class="doctypes-summary-chips"></div>
+            <div class="doctypes-table-wrap">
+                <table class="doctypes-table">
+                    <thead>
+                        <tr>
+                            <th style="width:26px;">#</th>
+                            <th>Sender</th>
+                            <th>Subject</th>
+                            <th style="width:90px;">Docs</th>
+                            <th>Document Type</th>
+                            <th>Conf.</th>
+                        </tr>
+                    </thead>
+                    <tbody id="doctypes-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Forwarded-mails list (entity view for "Label pending release-orders") -->
+    <div id="forwarded-mails-modal" class="doctypes-modal-overlay">
+        <div class="doctypes-modal">
+            <div class="doctypes-modal-head">
+                <h3><i class="fa-solid fa-list" style="color:#4285f4;"></i> Forwarded Mails — nl.importsea@shypple.com
+                </h3>
+                <button class="gmail-action-btn" onclick="closeForwardedMailsModal()" title="Close"><i
+                        class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="forwarded-mails-summary" class="doctypes-summary-chips"></div>
+            <div class="doctypes-table-wrap">
+                <table class="doctypes-table">
+                    <thead>
+                        <tr>
+                            <th style="width:26px;">#</th>
+                            <th>Subject</th>
+                            <th>Forwarded</th>
+                            <th>Label status</th>
+                            <th style="width:50px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="forwarded-mails-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Classification history (already-found document types) for the current label,
+         with a per-row delete and a "Clear all" for the whole label - see
+         viewClassificationHistory(). -->
+    <div id="classification-history-modal" class="doctypes-modal-overlay">
+        <div class="doctypes-modal">
+            <div class="doctypes-modal-head">
+                <h3><i class="fa-solid fa-clock-rotate-left" style="color:#3730a3;"></i> Document Type History</h3>
+                <button class="gmail-action-btn" onclick="closeClassificationHistoryModal()" title="Close"><i
+                        class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="classification-history-summary" class="doctypes-summary-chips"></div>
+            <div style="padding: 0 20px 12px; display:flex; justify-content:flex-end;">
+                <button class="gmail-action-btn" style="width:auto; padding:6px 14px; color:#dc2626; border-color:#fecaca;"
+                    onclick="clearClassificationHistory()">
+                    <i class="fa-solid fa-trash"></i> Clear all for this label
+                </button>
+            </div>
+            <div class="doctypes-table-wrap">
+                <table class="doctypes-table">
+                    <thead>
+                        <tr>
+                            <th style="width:26px;">#</th>
+                            <th>Sender</th>
+                            <th>Subject</th>
+                            <th style="width:90px;">Docs</th>
+                            <th>Document Type</th>
+                            <th>Containers</th>
+                            <th>Classified</th>
+                            <th style="width:50px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="classification-history-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Tab 2: Operations Process Content -->
+<div id="process-tab" class="tab-content">
+    <div class="glass-card"
+        style="margin-bottom: 24px; padding: 20px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; flex-shrink: 0;">
+        <div>
+            <h3 style="margin-bottom: 4px;"><i class="fa-solid fa-gear" style="margin-right: 6px;"></i> Shypple
+                verification</h3>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">
+                Select email(s) in the Gmail Inbox tab and click Process to verify their container(s) and document
+                type(s) against Shypple.
+            </p>
+        </div>
+        <button class="btn btn-secondary" id="launch-operations-btn" onclick="launchOperationsBrowser()"
+            style="width: auto; padding: 10px 20px;">
+            <i class="fa-solid fa-play"></i> Launch Shypple browser
+        </button>
+    </div>
+
+    <div id="operations-blocked-banner" style="flex-shrink: 0;"></div>
+    <div id="operations-banner" style="flex-shrink: 0;"></div>
+
+    <div id="process-panel" class="glass-card" style="padding: 24px; display: none; flex-shrink: 0;">
+        <div class="process-summary"></div>
+        <div class="process-job-list"></div>
+    </div>
+
+    <div id="process-empty-state" class="process-card" style="flex-shrink: 0;">
+        <i class="fa-solid fa-sliders" style="font-size: 3.5rem; color: var(--accent-indigo); margin-bottom: 24px;"></i>
+        <h2>No batch running yet</h2>
+        <p
+            style="color: var(--text-secondary); margin-top: 12px; max-width: 500px; margin-left: auto; margin-right: auto;">
+            Go to the Gmail Inbox tab, check one or more emails, then click Process.
+        </p>
+    </div>
+</div>
+
+<!-- Toast notifications + custom confirm dialog. This dashboard only ever runs inside
+     a Playwright-controlled browser tab (scripts/open_gmail.py's `page`) - Playwright
+     auto-dismisses native alert()/confirm() popups by default (no page.on('dialog', ...)
+     handler is registered anywhere), so a plain alert() silently never shows and a
+     plain `if (!confirm(...)) return;` always takes the "cancelled" branch instantly,
+     without ever waiting for a real click. These two replace every alert()/confirm()
+     call in this file so those actions actually work in the environment this app
+     actually runs in. -->
+<div id="toast-container"
+    style="position:fixed; top:20px; right:20px; z-index:5000; display:flex; flex-direction:column; gap:8px; max-width:380px;">
+</div>
+
+<div id="confirm-modal-overlay"
+    style="display:none; position:fixed; inset:0; z-index:5100; background:rgba(31,36,48,0.45); align-items:center; justify-content:center;">
+    <div
+        style="background:var(--bg-card, #fff); border-radius:12px; padding:24px; max-width:420px; width:90%; box-shadow:0 10px 40px rgba(0,0,0,0.25);">
+        <p id="confirm-modal-message" style="margin:0 0 20px; color:var(--text-primary, #1f2430); line-height:1.5;"></p>
+        <div style="display:flex; justify-content:flex-end; gap:10px;">
+            <button onclick="_confirmModalResolve(false)" class="gmail-back-btn">Cancel</button>
+            <button onclick="_confirmModalResolve(true)"
+                style="background:#dc2626; color:white; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; font-weight:600;">Confirm</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<script>
+    // ----- Toast notifications + custom confirm (see the HTML comment above these
+    // elements for why: native alert()/confirm() are silently unusable here). -----
+    function showToast(message, isError) {
+        const container = document.getElementById("toast-container");
+        if (!container) { console.log(message); return; }
+        const toast = document.createElement("div");
+        toast.style.cssText = `background:${isError ? "#fef2f2" : "#f0fdf4"}; color:${isError ? "#991b1b" : "#166534"}; `
+            + `border:1px solid ${isError ? "#fecaca" : "#bbf7d0"}; padding:12px 16px; border-radius:8px; `
+            + `box-shadow:0 4px 12px rgba(0,0,0,0.15); font-size:0.85rem; line-height:1.4;`;
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => {
+            toast.style.transition = "opacity 0.3s";
+            toast.style.opacity = "0";
+            setTimeout(() => toast.remove(), 300);
+        }, 5000);
+    }
+
+    window.__confirmModalCallback = null;
+    function confirmDialog(message) {
+        return new Promise(resolve => {
+            const overlay = document.getElementById("confirm-modal-overlay");
+            const msgEl = document.getElementById("confirm-modal-message");
+            if (!overlay || !msgEl) { resolve(false); return; }
+            msgEl.textContent = message;
+            window.__confirmModalCallback = resolve;
+            overlay.style.display = "flex";
+        });
+    }
+    function _confirmModalResolve(result) {
+        const overlay = document.getElementById("confirm-modal-overlay");
+        if (overlay) overlay.style.display = "none";
+        const cb = window.__confirmModalCallback;
+        window.__confirmModalCallback = null;
+        if (cb) cb(result);
+    }
+
+    // Tab switching logic
+    function switchTab(evt, tabId) {
+        // Get all elements with class="tab-content" and hide them
+        const tabContents = document.getElementsByClassName("tab-content");
+        for (let i = 0; i < tabContents.length; i++) {
+            tabContents[i].classList.remove("active");
+        }
+
+        // Get all elements with class="tab-btn" and remove the class "active"
+        const tabBtns = document.getElementsByClassName("tab-btn");
+        for (let i = 0; i < tabBtns.length; i++) {
+            tabBtns[i].classList.remove("active");
+        }
+
+        // Show the current tab, and add an "active" class to the button that opened the tab
+        document.getElementById(tabId).classList.add("active");
+        evt.currentTarget.classList.add("active");
+    }
+
+    // Same tab switch, callable without a real click event (e.g. from processSelectedMails()).
+    function activateTab(tabId) {
+        document.querySelectorAll(".tab-content").forEach(el => el.classList.remove("active"));
+        document.querySelectorAll(".tab-btn").forEach(el => el.classList.remove("active"));
+        const content = document.getElementById(tabId);
+        if (content) content.classList.add("active");
+        document.querySelectorAll(".tab-btn").forEach(btn => {
+            if ((btn.getAttribute("onclick") || "").includes(`'${tabId}'`)) btn.classList.add("active");
+        });
+    }
+
+    // ----- Multi-select checkboxes -> "Process" (Operations Process automation) -----
+    window.selectedMailIds = window.selectedMailIds || new Set();
+
+    function updateProcessButtonState() {
+        const btn = document.getElementById("process-selected-btn");
+        const countEl = document.getElementById("process-selected-count");
+        const selectAll = document.getElementById("select-all-checkbox");
+        if (!btn) return;
+        const n = window.selectedMailIds.size;
+        btn.disabled = n === 0;
+        btn.style.opacity = n === 0 ? "0.5" : "1";
+        if (countEl) countEl.textContent = n > 0 ? ` (${n})` : "";
+        if (selectAll) {
+            const total = document.querySelectorAll(".gmail-row").length;
+            selectAll.checked = total > 0 && n === total;
+            selectAll.indeterminate = n > 0 && n < total;
+        }
+    }
+
+    function toggleMailSelection(rowEl, checked) {
+        if (!rowEl) return;
+        const id = rowEl.dataset.id;
+        if (checked) window.selectedMailIds.add(id);
+        else window.selectedMailIds.delete(id);
+        updateProcessButtonState();
+    }
+
+    function toggleSelectAll(checkboxEl) {
+        const checked = checkboxEl.checked;
+        document.querySelectorAll(".gmail-row").forEach(row => {
+            const cb = row.querySelector(".mail-select-checkbox");
+            if (cb) cb.checked = checked;
+            if (checked) window.selectedMailIds.add(row.dataset.id);
+            else window.selectedMailIds.delete(row.dataset.id);
+        });
+        updateProcessButtonState();
+    }
+
+    // Step 1: read the selected email(s) (containers + document types) and show them
+    // for review - this never touches the Shypple browser. Step 2 (below,
+    // confirmAndStartOperations) is the only thing that opens Shypple, and only runs
+    // once the user has looked at this review and clicked through it.
+    function processSelectedMails() {
+        const labelBox = document.getElementById("label-input");
+        const currentLabel = labelBox ? labelBox.value.trim() : "";
+        if (currentLabel === "lcl-arrivals---release") {
+            return processLclSelectedMails();
+        }
+
+        const ids = Array.from(window.selectedMailIds);
+        if (!ids.length) return;
+
+        // Blocks pollOperationsStatus from touching process-panel/operations-banner
+        // until this review is either confirmed or cancelled (see confirmAndStartOperations/
+        // cancelOperationsReview). Without this, a status-poll tick still in flight from a
+        // JUST-finished previous batch could land in the gap before /api/operations/extract
+        // returns below - window.__activeBatchMessageIds is already the NEW selection at that
+        // point, but the server hasn't started a new batch yet, so it still reports the OLD
+        // batch's jobs. renderOperationsPanel's own "don't erase a real running job" fallback
+        // then shows that old batch instead of nothing, stomping the new review with stale
+        // data - this is what made a fresh selection appear to show "the mail I ran the
+        // previous time." Stopping any leftover timer immediately (not just gating the
+        // render) also means no stray tick is even scheduled to race this.
+        window.__reviewPending = true;
+        if (window.__operationsPollTimer) { clearInterval(window.__operationsPollTimer); window.__operationsPollTimer = null; }
+
+        window.__activeBatchMessageIds = new Set(ids);
+        window.__longActionInFlight = true;
+        const btn = document.getElementById("process-selected-btn");
+        if (btn) btn.disabled = true;
+
+        activateTab("process-tab");
+        renderOperationsLoading(ids.length);
+
+        fetch("/api/operations/extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message_ids: ids })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    window.__reviewPending = false;
+                    renderOperationsError(data.error || "Failed to read the selected email(s).");
+                    return;
+                }
+                renderOperationsReview(data.jobs, data.errors || []);
+            })
+            .catch(err => { window.__reviewPending = false; renderOperationsError("Error: " + err); })
+            .finally(() => { window.__longActionInFlight = false; if (btn) btn.disabled = window.selectedMailIds.size === 0; });
+    }
+
+    function renderOperationsLoading(count) {
+        const panel = document.getElementById("process-panel");
+        const banner = document.getElementById("operations-banner");
+        const emptyState = document.getElementById("process-empty-state");
+        if (emptyState) emptyState.style.display = "none";
+        if (banner) banner.innerHTML = "";
+        if (panel) {
+            panel.style.display = "block";
+            panel.innerHTML = `<div class="process-summary"><i class="fa-solid fa-spinner fa-spin"></i> `
+                + `Reading ${count} email(s) for container numbers and document types...</div>`;
+        }
+    }
+
+    // ----- Review step: show extracted containers/document types, wait for confirmation -----
+    window.__pendingOperationsJobs = window.__pendingOperationsJobs || [];
+    // {value option, source: "shypple"|"internal"} - "shypple" means these are REAL
+    // options scraped off Shypple's own dropdown (guaranteed to select2-match);
+    // "internal" is our own canonical type list, shown only as a fallback before
+    // Shypple's real list has ever been captured (see /operations/document_type_options).
+    window.__docTypeOptionsCache = window.__docTypeOptionsCache || null;
+
+    function _normalizeTypeText(s) {
+        return (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    }
+
+    // Same fuzzy substring logic as shypple_process.py's _select2_set_native, so the
+    // dropdown's default selection previews what the automation would actually pick.
+    function _bestMatchingOption(extractedType, options) {
+        const target = _normalizeTypeText(extractedType);
+        if (!target) return null;
+        for (const opt of options) {
+            const n = _normalizeTypeText(opt);
+            if (n && (n === target || n.includes(target) || target.includes(n))) return opt;
+        }
+        return null;
+    }
+
+    function fetchDocTypeOptions() {
+        if (window.__docTypeOptionsCache) return Promise.resolve(window.__docTypeOptionsCache);
+        return fetch("/api/operations/document_type_options")
+            .then(res => res.json())
+            .then(data => {
+                window.__docTypeOptionsCache = { options: data.options || [], source: data.source || "internal" };
+                return window.__docTypeOptionsCache;
+            })
+            .catch(() => ({ options: [], source: "internal" }));
+    }
+
+    function setTypeOverride(jobIndex, extractedType, newValue) {
+        const job = window.__pendingOperationsJobs[jobIndex];
+        if (!job) return;
+        job.type_overrides = job.type_overrides || {};
+        if (newValue && newValue !== extractedType) job.type_overrides[extractedType] = newValue;
+        else delete job.type_overrides[extractedType];
+    }
+
+    function refreshDocTypeOptionsFromShypple() {
+        const link = document.getElementById("refresh-doctype-options-link");
+        if (link) link.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Refreshing from Shypple...';
+        fetch("/api/operations/refresh_document_type_options", { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success && data.options) {
+                    window.__docTypeOptionsCache = { options: data.options, source: "shypple" };
+                    showToast(`Captured ${data.options.length} document type(s) live from Shypple.`);
+                    renderOperationsReview(window.__pendingOperationsJobs, []);
+                } else {
+                    showToast(data.error || "Could not refresh from Shypple.", true);
+                }
+            })
+            .catch(err => showToast("Error: " + err, true))
+            .finally(() => {
+                const l = document.getElementById("refresh-doctype-options-link");
+                if (l) l.innerHTML = '<i class="fa-solid fa-rotate"></i> Refresh from Shypple';
+            });
+    }
+
+    function renderOperationsReview(jobs, errors) {
+        window.__pendingOperationsJobs = jobs;
+        const panel = document.getElementById("process-panel");
+        const banner = document.getElementById("operations-banner");
+        const emptyState = document.getElementById("process-empty-state");
+        if (emptyState) emptyState.style.display = "none";
+        if (banner) banner.innerHTML = "";
+        if (!panel) return;
+        panel.style.display = "block";
+
+        fetchDocTypeOptions().then(({ options, source }) => {
+            const rows = jobs.map((job, jobIndex) => {
+                const containers = (job.containers && job.containers.length)
+                    ? containerChips(job.containers)
+                    : '<span class="process-review-empty">No container numbers found</span>';
+
+                const types = (job.doc_types && job.doc_types.length)
+                    ? job.doc_types.map(t => {
+                        if (!options.length) {
+                            // Nothing to choose from yet at all - show the plain badge, same as before.
+                            return `<span class="row-doctype-badge">${escapeHtml(t)}</span>`;
+                        }
+                        const existingOverride = (job.type_overrides || {})[t];
+                        const defaultValue = existingOverride || _bestMatchingOption(t, options) || "";
+                        if (defaultValue && !job.type_overrides) job.type_overrides = {};
+                        if (defaultValue && defaultValue !== t && !existingOverride) job.type_overrides[t] = defaultValue;
+                        const optionTags = options.map(o =>
+                            `<option value="${escapeHtml(o)}" ${o === defaultValue ? "selected" : ""}>${escapeHtml(o)}</option>`
+                        ).join("");
+                        const noMatchTag = defaultValue ? "" : `<option value="" selected>-- no Shypple match for "${escapeHtml(t)}", pick one --</option>`;
+                        return `<span class="doctype-override-group">
+                            <span class="doctype-override-label">${escapeHtml(t)} <i class="fa-solid fa-arrow-right" style="font-size:0.7em; opacity:0.6;"></i></span>
+                            <select class="doctype-override-select" onchange="setTypeOverride(${jobIndex}, '${escapeHtml(t).replace(/'/g, "&#39;")}', this.value)">
+                                ${noMatchTag}${optionTags}
+                            </select>
+                        </span>`;
+                    }).join(" ")
+                    : '<span class="process-review-empty">No document type found</span>';
+
+                // Filenames and document types structured list for clear user verification
+                const filenames = job.doc_filenames || [];
+                const docTypesList = job.doc_types || [];
+                let docsBreakdown = "";
+                if (docTypesList.length > 0) {
+                    docsBreakdown = `<div class="process-review-line" style="margin-top: 8px;">
+                        <b>Document Verification (${docTypesList.length} attachment${docTypesList.length === 1 ? "" : "s"}):</b>
+                        <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 6px;">
+                            ${docTypesList.map((t, i) => {
+                                const fn = filenames[i] || `Attachment #${i + 1}`;
+                                return `<div style="display: flex; align-items: center; justify-content: space-between; background: var(--surface-muted, #f8fafc); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0);">
+                                    <span style="font-weight: 500; word-break: break-all; color: var(--text-primary);"><i class="fa-solid fa-file-pdf" style="color: #ef4444; margin-right: 6px;"></i> ${escapeHtml(fn)}</span>
+                                    <span class="row-doctype-badge" style="margin-left: 12px; flex-shrink: 0;">${escapeHtml(t)}</span>
+                                </div>`;
+                            }).join("")}
+                        </div>
+                    </div>`;
+                }
+
+                return `
+                    <div class="process-job-row">
+                        <div class="process-job-main">
+                            <span class="process-job-subject">${escapeHtml(job.subject || job.message_id || "")}</span>
+                        </div>
+                        <div class="process-review-line"><b>Containers:</b> ${containers}</div>
+                        <div class="process-review-line"><b>Document type override${(job.doc_types || []).length === 1 ? "" : "s"}:</b> ${types}</div>
+                        ${docsBreakdown}
+                    </div>`;
+            }).join("");
+
+            const errorNote = errors.length
+                ? `<div class="process-review-errors"><i class="fa-solid fa-triangle-exclamation"></i> Could not read ${errors.length} email(s): ${errors.map(e => escapeHtml(e.subject || e.message_id)).join(", ")}</div>`
+                : "";
+
+            const sourceNote = options.length
+                ? (source === "shypple"
+                    ? `<div class="process-review-source-note"><i class="fa-solid fa-circle-check" style="color:#0f9d76;"></i> Document type choices are Shypple's own live options.</div>`
+                    : `<div class="process-review-source-note"><i class="fa-solid fa-circle-info"></i> Showing our internal type list - Shypple's real options haven't been captured yet (happens automatically after the first upload).
+                       <a id="refresh-doctype-options-link" href="#" onclick="refreshDocTypeOptionsFromShypple(); return false;"><i class="fa-solid fa-rotate"></i> Refresh from Shypple</a></div>`)
+                : "";
+
+            panel.innerHTML = `
+                <div class="process-summary">Review before opening Shypple - ${jobs.length} email(s)</div>
+                <div class="process-job-list">${rows}</div>
+                ${errorNote}
+                ${sourceNote}
+                <div class="process-review-actions">
+                    <button class="btn" style="width:auto; padding:10px 24px;" onclick="confirmAndStartOperations()">
+                        <i class="fa-solid fa-check"></i> Looks good - open Shypple
+                    </button>
+                    <button class="gmail-back-btn" onclick="cancelOperationsReview()">Cancel</button>
+                </div>`;
+        });
+    }
+
+    function cancelOperationsReview() {
+        window.__reviewPending = false;
+        window.__pendingOperationsJobs = [];
+        const panel = document.getElementById("process-panel");
+        const emptyState = document.getElementById("process-empty-state");
+        if (panel) { panel.style.display = "none"; panel.innerHTML = ""; }
+        if (emptyState) emptyState.style.display = "block";
+    }
+
+    // ----- LCL Arrivals / Release: a second, parallel review step (see
+    // processSelectedMails' branch above). Reuses renderOperationsLoading,
+    // cancelOperationsReview, confirmAndStartOperations, startOperationsPolling and
+    // the whole status-polling/gate machinery below as-is - only the "what does the
+    // review look like" and "what job shape gets POSTed" parts differ. -----
+    window.__pendingLclItems = window.__pendingLclItems || [];
+
+    const LCL_MAIL_TYPE_LABELS = {
+        shipment_not_released: "Shipment Not Released",
+        delay_or_devanning: "Delay / Devanning",
+        arrival_notice: "Arrival Notice",
+        delivery_order: "Delivery Order",
+        unknown: "Unknown - pick a type manually",
+    };
+
+    function processLclSelectedMails() {
+        const ids = Array.from(window.selectedMailIds);
+        if (!ids.length) return;
+
+        window.__reviewPending = true;
+        if (window.__operationsPollTimer) { clearInterval(window.__operationsPollTimer); window.__operationsPollTimer = null; }
+        window.__activeBatchMessageIds = new Set(ids);
+        window.__longActionInFlight = true;
+        const btn = document.getElementById("process-selected-btn");
+        if (btn) btn.disabled = true;
+
+        activateTab("process-tab");
+        renderOperationsLoading(ids.length);
+
+        fetch("/api/operations/lcl_arrivals_process", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message_ids: ids })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    window.__reviewPending = false;
+                    renderOperationsError(data.error || "Failed to read the selected email(s).");
+                    return;
+                }
+                renderLclOperationsReview(data.items || []);
+            })
+            .catch(err => { window.__reviewPending = false; renderOperationsError("Error: " + err); })
+            .finally(() => { window.__longActionInFlight = false; if (btn) btn.disabled = window.selectedMailIds.size === 0; });
+    }
+
+    function setLclFieldOverride(itemIndex, field, value) {
+        const item = window.__pendingLclItems[itemIndex];
+        if (!item) return;
+        item.extracted = item.extracted || {};
+        item.extracted[field] = value;
+    }
+
+    function renderLclOperationsReview(items) {
+        window.__pendingLclItems = items;
+        const panel = document.getElementById("process-panel");
+        const banner = document.getElementById("operations-banner");
+        const emptyState = document.getElementById("process-empty-state");
+        if (emptyState) emptyState.style.display = "none";
+        if (banner) banner.innerHTML = "";
+        if (!panel) return;
+        panel.style.display = "block";
+
+        const doneItems = items.filter(it => it.status !== "pending_preview");
+        const pendingItems = items.filter(it => it.status === "pending_preview");
+
+        const typeBadge = (it) => `<span class="row-doctype-badge">${escapeHtml(LCL_MAIL_TYPE_LABELS[it.mail_type] || it.mail_type || "")}</span>`;
+
+        const doneRows = doneItems.map(it => `
+            <div class="process-job-row">
+                <div class="process-job-main">
+                    <span class="process-job-subject">${escapeHtml(it.subject || it.message_id || "")}</span>
+                    ${typeBadge(it)}
+                </div>
+                <div class="process-review-line">${it.status === "error"
+                    ? `<i class="fa-solid fa-triangle-exclamation" style="color:#dc2626;"></i> ${escapeHtml(it.note || "Error")}`
+                    : `<i class="fa-solid fa-circle-check" style="color:#0f9d76;"></i> ${escapeHtml(it.note || "Done")}`}</div>
+            </div>`).join("");
+
+        const pendingRows = pendingItems.map((item) => {
+            const itemIndex = items.indexOf(item);
+            const ex = item.extracted || {};
+            const fields = [["container_number", "Container #"], ["devanning_date", "Devanning / Available Date"]];
+            if (item.mail_type === "arrival_notice") {
+                fields.push(["customs_number", "Customs Number"], ["cfs_address", "CFS / Warehouse"]);
+            }
+            const fieldInputs = fields.map(([key, label]) => `
+                <span class="doctype-override-group">
+                    <span class="doctype-override-label">${label}</span>
+                    <input type="text" class="doctype-override-select" style="min-width:170px;"
+                        value="${escapeHtml(ex[key] || "")}"
+                        onchange="setLclFieldOverride(${itemIndex}, '${key}', this.value)" />
+                </span>`).join(" ");
+
+            return `
+                <div class="process-job-row">
+                    <div class="process-job-main">
+                        <span class="process-job-subject">${escapeHtml(item.subject || item.message_id || "")}</span>
+                        ${typeBadge(item)}
+                    </div>
+                    <div class="process-review-line"><b>SF Number:</b> ${escapeHtml(item.sf_number || "(not found - required to locate the shipment)")}</div>
+                    <div class="process-review-line" style="margin-top:8px;"><b>Extracted data (edit if wrong before opening Shypple):</b><br/>${fieldInputs}</div>
+                </div>`;
+        }).join("");
+
+        window.__pendingOperationsJobs = pendingItems.map(it => ({
+            flow: "lcl_arrivals",
+            message_id: it.message_id,
+            subject: it.subject,
+            mail_type: it.mail_type,
+            sf_number: it.sf_number,
+            extracted: it.extracted || {},
+            // Delivery Order mail can carry a SECOND real document that also resolves
+            // to "Delivery order" on its own merit (e.g. a carrier's own "Release" PDF
+            // alongside the main Delivery order PDF) - extraction above is driven
+            // entirely by the first one, but this one still needs uploading to
+            // Shypple. Must survive this reconstruction or handle_delivery_order never
+            // learns about it.
+            extra_doc_attachment_indices: it.extra_doc_attachment_indices || [],
+        }));
+
+        const doneNote = doneItems.length
+            ? `<div class="process-review-source-note"><i class="fa-solid fa-circle-check" style="color:#0f9d76;"></i> ${doneItems.length} email(s) already resolved - no Shypple action needed.</div>${doneRows}`
+            : "";
+
+        const actions = pendingItems.length ? `
+            <div class="process-review-actions">
+                <button class="btn" style="width:auto; padding:10px 24px;" onclick="confirmAndStartOperations()">
+                    <i class="fa-solid fa-check"></i> Looks good - open Shypple
+                </button>
+                <button class="gmail-back-btn" onclick="cancelOperationsReview()">Cancel</button>
+            </div>` : `
+            <div class="process-review-actions">
+                <button class="gmail-back-btn" onclick="cancelOperationsReview()">Close</button>
+            </div>`;
+
+        panel.innerHTML = `
+            <div class="process-summary">Review before opening Shypple - ${items.length} email(s)</div>
+            ${doneNote}
+            <div class="process-job-list">${pendingRows}</div>
+            ${actions}`;
+    }
+
+    // Step 2: the ONLY action that opens/reuses the Shypple browser - runs after the
+    // user has reviewed containers/document types above and clicked through.
+    function confirmAndStartOperations() {
+        const jobs = window.__pendingOperationsJobs || [];
+        if (!jobs.length) return;
+
+        // Review is over (confirmed) - let pollOperationsStatus resume driving
+        // process-panel/operations-banner from here on.
+        window.__reviewPending = false;
+        window.__longActionInFlight = true;
+        const panel = document.getElementById("process-panel");
+        if (panel) {
+            panel.innerHTML = `<div class="process-summary"><i class="fa-solid fa-spinner fa-spin"></i> `
+                + `Opening the Shypple browser (if not already open) and starting verification - `
+                + `this can take up to a minute on first launch...</div>`;
+        }
+
+        fetch("/api/operations/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobs: jobs })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    window.__activeBatchMessageIds = new Set(jobs.map(j => j.message_id));
+                    window.__pendingOperationsJobs = [];
+                    window.__operationsStartBlocked = null;
+                } else {
+                    // This selection did NOT become the active batch - it was rejected
+                    // outright. Drop the optimistic filter set from processSelectedMails()
+                    // (step 1) so the panel below shows the REAL running batch's jobs
+                    // instead of filtering them out because their ids don't match this
+                    // never-started selection - see renderOperationsPanel's fallback too.
+                    window.__activeBatchMessageIds = null;
+                    // The batch server (POST /run_batch) flatly rejects with 409 when a
+                    // previous batch is still running/awaiting confirmation - this
+                    // selection was NOT queued anywhere, it's simply dropped. Silently
+                    // falling through to the real status previously showed whatever
+                    // job WAS already running (e.g. an earlier, unrelated email still
+                    // awaiting confirmation) with no indication that it wasn't the
+                    // selection the user just submitted - reading as "the wrong
+                    // record" even though nothing actually mismatched. Keep the
+                    // pending jobs (nothing lost) and surface this distinctly so the
+                    // status below is never mistaken for the new selection.
+                    window.__operationsStartBlocked = {
+                        error: data.error || "Could not start.",
+                        subjects: jobs.map(j => j.subject || j.message_id).join(", "),
+                    };
+                }
+                // Either way, defer to the REAL server status rather than trusting/
+                // discarding based on this response alone.
+                startOperationsPolling();
+            })
+            .catch(err => { window.__longActionInFlight = false; renderOperationsError("Error: " + err); });
+    }
+
+    // Statuses where a job is fully paused waiting on a human decision (mirrors the
+    // server's own is_paused check in shypple_process.py's /proceed handler) - while any
+    // job sits at one of these, batch_state["running"] stays True and /run_batch 409s any
+    // new selection.
+    const OPERATIONS_AWAITING_STATUSES = [
+        "awaiting_upload_confirmation", "awaiting_forward_confirmation",
+        "awaiting_submit_confirmation", "awaiting_no_record_confirmation",
+        "awaiting_org_switch_confirmation",
+        "awaiting_lcl_container_confirmation", "awaiting_lcl_submit_confirmation",
+        "awaiting_lcl_delivery_confirmation", "awaiting_lcl_date_confirmation",
+    ];
+
+    function renderBlockedBanner(state) {
+        const el = document.getElementById("operations-blocked-banner");
+        if (!el) return;
+        const blocked = window.__operationsStartBlocked;
+        if (blocked && state && state.running) {
+            el.innerHTML = `
+                <div class="process-banner process-banner-error">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <span class="process-banner-text">Your selection (${escapeHtml(blocked.subjects)}) was <b>not</b> started - ${escapeHtml(blocked.error)}
+                    The job shown below is from that still-running earlier batch, not your new selection.</span>
+                </div>`;
+            return;
+        }
+        if (blocked && (!state || !state.running)) {
+            el.innerHTML = `
+                <div class="process-banner process-banner-warn">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span class="process-banner-text">The earlier batch has finished. Your selection (${escapeHtml(blocked.subjects)}) is still waiting to be started.</span>
+                    <button class="btn" style="width:auto; padding:6px 16px;" onclick="retryBlockedOperations()">Retry now</button>
+                </div>`;
+            return;
+        }
+        // No client-side memory of a failed attempt (e.g. the page was reloaded since -
+        // window.__operationsStartBlocked never survives that), but the server itself is
+        // still sitting on a job that needs a human decision. Derive the same warning from
+        // server truth alone so it doesn't depend on being on the exact same page load that
+        // hit the 409 - otherwise the panel below just silently shows that old job with no
+        // explanation, reading as "the wrong record" for whatever was selected since.
+        const stuckJob = state && state.running
+            ? (state.jobs || []).find(j => OPERATIONS_AWAITING_STATUSES.includes(j.status))
+            : null;
+        el.innerHTML = stuckJob ? `
+                <div class="process-banner process-banner-warn">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span class="process-banner-text">"${escapeHtml(stuckJob.subject || stuckJob.message_id)}" is paused below awaiting your confirmation.
+                    Until it's confirmed (or Shypple is relaunched), no new selection can start - any Process click will be silently rejected.</span>
+                </div>` : "";
+    }
+
+    function retryBlockedOperations() {
+        window.__operationsStartBlocked = null;
+        const el = document.getElementById("operations-blocked-banner");
+        if (el) el.innerHTML = "";
+        confirmAndStartOperations();
+    }
+
+    // ----- Operations Process status panel (polls the Flask proxy -> Shypple control server) -----
+    window.__operationsPollTimer = window.__operationsPollTimer || null;
+
+    function startOperationsPolling() {
+        if (window.__operationsPollTimer) clearInterval(window.__operationsPollTimer);
+        pollOperationsStatus();
+        window.__operationsPollTimer = setInterval(pollOperationsStatus, 2000);
+    }
+
+    function pollOperationsStatus() {
+        // A review (containers/doc types, pre-Shypple) is currently showing - it owns
+        // process-panel/operations-banner until the user confirms or cancels it, see
+        // processSelectedMails. Don't let a status tick overwrite it with the previous
+        // batch's (possibly stale) jobs in the meantime.
+        if (window.__reviewPending) return;
+        fetch("/api/operations/status")
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    window.__longActionInFlight = false;
+                    renderBlockedBanner(null);
+                    renderOperationsError(data.error || "The Shypple automation browser is not running.");
+                    return;
+                }
+                renderBlockedBanner(data.state);
+                renderOperationsPanel(data.state);
+                if (!data.state.running && window.__operationsPollTimer) {
+                    window.__longActionInFlight = false;
+                    clearInterval(window.__operationsPollTimer);
+                    window.__operationsPollTimer = null;
+                }
+            })
+            .catch(err => renderOperationsError("Error: " + err));
+    }
+
+    function launchOperationsBrowser() {
+        const btn = document.getElementById("launch-operations-btn");
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Launching...'; }
+        fetch("/api/operations/launch", { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    showToast("Shypple automation browser is ready.");
+                } else {
+                    showToast(data.error || "Failed to launch the Shypple automation browser.", true);
+                }
+            })
+            .catch(err => showToast("Error: " + err, true))
+            // Reset when the request ACTUALLY finishes (launch can take up to 45s on a
+            // cold start), not on a fixed timer - the previous 2000ms setTimeout reset
+            // the button back to idle while the launch was often still in progress in
+            // the background, making the click look like it did nothing.
+            .finally(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-play"></i> Launch Shypple browser'; } });
+    }
+
+    // Catch-up for the a-release-orders label in the nl.importsea@shypple.com mailbox:
+    // forward_and_relabel's own relabel attempt is best-effort (the forwarded copy may
+    // not have arrived yet, or a selector guess can miss) - this retries every mail the
+    // forwarded-mail tracker still has marked as not labeled. Shows the per-day
+    // breakdown first (from the tracker's forwarded_at dates), then labels them.
+    function labelPendingReleaseOrders() {
+        window.__longActionInFlight = true;
+        const btn = document.getElementById("label-pending-btn");
+        const resultEl = document.getElementById("label-pending-result");
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Checking...'; }
+        if (resultEl) resultEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Checking how many forwarded mails still need labeling...';
+
+        fetch("/api/operations/pending_relabel_summary")
+            .then(res => res.json())
+            .then(summary => {
+                if (!summary.success) {
+                    resultEl.innerHTML = `<span style="color:#dc2626;"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(summary.error || "Failed to check pending mails.")}</span>`;
+                    return null;
+                }
+                const pending = summary.pending_count || 0;
+                const byDay = summary.by_day || {};
+                const dayLines = Object.keys(byDay).sort().reverse().map(day => `${day}: ${byDay[day]}`).join(", ");
+                if (pending === 0) {
+                    resultEl.innerHTML = `<span style="color:var(--text-muted);">No forwarded mails are waiting to be labeled.</span>`;
+                    return null;
+                }
+                resultEl.innerHTML = `<div>${pending} forwarded mail(s) awaiting the a-release-orders label (${escapeHtml(dayLines)}).</div>`
+                    + `<div><i class="fa-solid fa-spinner fa-spin"></i> Labeling now...</div>`;
+                if (btn) btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Labeling...';
+
+                return fetch("/api/operations/label_pending_relabel", { method: "POST" })
+                    .then(res => res.json())
+                    .then(data => {
+                        const found = data.found_count || 0;
+                        const labeled = data.labeled_count || 0;
+                        const failures = data.failures || [];
+                        const shown = failures.slice(0, 5).map(f => `${escapeHtml(f.subject || f.message_id)} (${escapeHtml(f.error || "unknown reason")})`);
+                        const more = failures.length > 5 ? ` (+${failures.length - 5} more)` : "";
+                        const failureNote = failures.length
+                            ? `<div style="color:#dc2626; margin-top:4px;">Still not labeled: ${shown.join("; ")}${more}</div>` : "";
+                        resultEl.innerHTML = `<div>${pending} forwarded mail(s) awaiting the a-release-orders label (${escapeHtml(dayLines)}).</div>`
+                            + (labeled === found
+                                ? `<span style="color:#0f9d76;"><i class="fa-solid fa-check"></i> Labeled ${labeled}/${found}.</span>`
+                                : `<span style="color:#b45309;"><i class="fa-solid fa-triangle-exclamation"></i> Labeled ${labeled}/${found}.</span>${failureNote}`);
+                    });
+            })
+            .catch(err => { resultEl.innerHTML = `<span style="color:#dc2626;"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeHtml(String(err))}</span>`; })
+            .finally(() => { window.__longActionInFlight = false; if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-tag"></i> Label pending release-orders'; } });
+    }
+
+    function proceedOperations() {
+        fetch("/api/operations/proceed", { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) showToast(data.error || "Nothing is currently paused.", true);
+                else pollOperationsStatus();
+            })
+            .catch(err => showToast("Error: " + err, true));
+    }
+
+    async function skipOperations() {
+        const ok = await confirmDialog("Skip this email? Its pending action will NOT be performed, and it will be left as-is (no star/read change) so you can reprocess it later.");
+        if (!ok) return;
+        fetch("/api/operations/skip", { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) showToast(data.error || "Nothing is currently paused.", true);
+                else pollOperationsStatus();
+            })
+            .catch(err => showToast("Error: " + err, true));
+    }
+
+    const _JOB_STATUS_LABELS = {
+        queued: "Queued",
+        processing: "Processing...",
+        no_match: "No matching shipment found",
+        up_to_date: "Up to date - already on Shypple",
+        awaiting_upload_confirmation: "Awaiting your confirmation",
+        awaiting_forward_confirmation: "Awaiting confirmation to forward",
+        awaiting_submit_confirmation: "Form filled - awaiting confirmation to submit",
+        awaiting_no_record_confirmation: "Awaiting confirmation - no record found",
+        awaiting_org_switch_confirmation: "No organization - awaiting confirmation to switch org",
+        uploaded: "Uploaded to Shypple",
+        upload_partial: "Some document(s) failed to upload",
+        upload_failed: "Upload failed",
+        skipped_no_org: "No organization - forwarded, not uploaded",
+        cancelled_or_deleted: "Shipment cancelled/deleted - not uploaded",
+        skipped_by_operator: "Skipped by operator",
+        error: "Error",
+        // LCL Arrivals / Release pipeline (scripts/shypple_process.py's
+        // process_lcl_arrival_job and its handlers).
+        awaiting_lcl_container_confirmation: "Container & date filled - awaiting confirmation",
+        awaiting_lcl_submit_confirmation: "Document form filled - awaiting confirmation to submit",
+        awaiting_lcl_delivery_confirmation: "Awaiting confirmation - verify container tab data",
+        awaiting_lcl_date_confirmation: "Awaiting confirmation to update devanning date",
+        lcl_done: "Done - read + yellow starred",
+        skipped_cluster_or_fcl: "Skipped - Cluster 3 or FCL",
+        flagged_my_jewellery: "Flagged - My Jewellery customer",
+        lcl_incomplete_container: "Container tab incomplete - process Arrival Notice first",
+        lcl_no_date_found: "No date could be extracted",
+        lcl_no_document_found: "No document found - unread + yellow starred",
+    };
+
+    function _jobBadgeClass(status) {
+        if (status === "up_to_date" || status === "uploaded" || status === "lcl_done") return "job-badge-ok";
+        if (status === "no_match" || status === "error" || status === "upload_failed") return "job-badge-fail";
+        if (status === "awaiting_upload_confirmation" || status === "awaiting_forward_confirmation"
+            || status === "awaiting_submit_confirmation" || status === "awaiting_no_record_confirmation"
+            || status === "awaiting_org_switch_confirmation"
+            || status === "upload_partial" || status === "skipped_no_org" || status === "cancelled_or_deleted"
+            || status === "skipped_by_operator"
+            || status === "awaiting_lcl_container_confirmation" || status === "awaiting_lcl_submit_confirmation"
+            || status === "awaiting_lcl_delivery_confirmation" || status === "awaiting_lcl_date_confirmation"
+            || status === "skipped_cluster_or_fcl" || status === "flagged_my_jewellery"
+            || status === "lcl_incomplete_container" || status === "lcl_no_date_found"
+            || status === "lcl_no_document_found") return "job-badge-warn";
+        return "job-badge-pending";
+    }
+
+    function renderOperationsError(message) {
+        const banner = document.getElementById("operations-banner");
+        const panel = document.getElementById("process-panel");
+        const emptyState = document.getElementById("process-empty-state");
+        if (banner) banner.innerHTML = `<div class="process-banner process-banner-error"><i class="fa-solid fa-triangle-exclamation"></i> <span class="process-banner-text">${escapeHtml(message)}</span></div>`;
+        // No batch is actually running when this fires - drop the loading/queued panel
+        // instead of leaving it sitting next to the error, which read as contradictory.
+        if (panel) { panel.style.display = "none"; panel.innerHTML = ""; }
+        if (emptyState) emptyState.style.display = "block";
+    }
+
+    function renderOperationsPanel(state) {
+        const panel = document.getElementById("process-panel");
+        const banner = document.getElementById("operations-banner");
+        const emptyState = document.getElementById("process-empty-state");
+        if (!panel) return;
+        panel.style.display = "block";
+        if (emptyState) emptyState.style.display = "none";
+
+        window.__activeBatchMessageIds = window.__activeBatchMessageIds || null;
+        let jobs = state.jobs || [];
+        if (window.__activeBatchMessageIds && window.__activeBatchMessageIds.size > 0) {
+            const filtered = jobs.filter(j => window.__activeBatchMessageIds.has(j.message_id));
+            // Only trust the client-side filter when it actually matches something the
+            // server is reporting. If it matches nothing - stale ids left over from a
+            // selection that never became the active batch, or the server moved on to a
+            // different job entirely - showing zero rows here hides the real running/
+            // stuck job and makes the panel look permanently empty with no way to act on
+            // it. Server truth (state.jobs) wins whenever the filter would erase it.
+            if (filtered.length > 0) jobs = filtered;
+        }
+
+        if (banner) {
+            if (state.paused_reason === "google_login") {
+                banner.innerHTML = `
+                    <div class="process-banner process-banner-warn">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <span class="process-banner-text">Complete the Google sign-in in the Shypple browser window that opened, then click Proceed.</span>
+                        <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Proceed</button>
+                    </div>`;
+            } else {
+                const awaitingUpload = jobs.find(j => j.status === "awaiting_upload_confirmation");
+                const awaitingSubmit = jobs.find(j => j.status === "awaiting_submit_confirmation");
+                const awaitingForward = jobs.find(j => j.status === "awaiting_forward_confirmation");
+                const awaitingNoRecord = jobs.find(j => j.status === "awaiting_no_record_confirmation");
+                const awaitingOrgSwitch = jobs.find(j => j.status === "awaiting_org_switch_confirmation");
+                if (awaitingUpload) {
+                    const uploadReasons = awaitingUpload.upload_reasons || [];
+                    // Match each upload reason back to the email's own attachment filename
+                    // (job.doc_filenames, parallel to doc_types/doc_attachment_indices) by
+                    // attachment_index first - required for a multi-attachment ("double
+                    // document") mail, where two attachments can share the same type and a
+                    // plain type-name lookup would show the wrong file for one of them.
+                    const jobDocTypes = awaitingUpload.doc_types || [];
+                    const jobDocIndices = awaitingUpload.doc_attachment_indices || [];
+                    const jobDocFilenames = awaitingUpload.doc_filenames || [];
+                    const filenameForReason = (r) => {
+                        let i = (r.attachment_index === null || r.attachment_index === undefined)
+                            ? -1 : jobDocIndices.findIndex(idx => idx === r.attachment_index);
+                        if (i === -1) i = jobDocTypes.findIndex(t => t === r.type);
+                        return i >= 0 ? (jobDocFilenames[i] || "") : "";
+                    };
+                    const reasons = uploadReasons.length
+                        ? uploadReasons.map(r => {
+                            const fn = filenameForReason(r);
+                            const label = fn ? `${escapeHtml(fn)} (${escapeHtml(r.type)})` : escapeHtml(r.type);
+                            return `${label} - ${escapeHtml(r.reason)}`;
+                        }).join("; ")
+                        : (awaitingUpload.missing_doc_types || []).join(", ");
+                    // Field-by-field diff tables - one per document type that has a
+                    // confirmed content difference against the email's own copy, so
+                    // the operator can actually SEE what differs before approving,
+                    // not just a one-line prose summary.
+                    const diffBlocks = uploadReasons
+                        .filter(r => r.differences && r.differences.length)
+                        .map(r => `
+                            <div class="upload-diff-block">
+                                <div class="upload-diff-title">Differences found for "${escapeHtml(r.type)}":</div>
+                                <table class="upload-diff-table">
+                                    <thead><tr><th>Field</th><th>Email's copy</th><th>Shypple's copy</th></tr></thead>
+                                    <tbody>${r.differences.map(d => `<tr>`
+                            + `<td>${escapeHtml(d.field || "")}</td>`
+                            + `<td>${escapeHtml(d.email_value || "")}</td>`
+                            + `<td>${escapeHtml(d.shypple_value || "")}</td>`
+                            + `</tr>`).join("")}</tbody>
+                                </table>
+                            </div>`)
+                        .join("");
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn" style="flex-direction:column; align-items:stretch;">
+                            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px;">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                <span class="process-banner-text">"${escapeHtml(awaitingUpload.subject || awaitingUpload.message_id)}" needs upload: <b>${reasons}</b>.</span>
+                                <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm upload</button>
+                                <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            </div>
+                            ${diffBlocks}
+                        </div>`;
+                } else if (awaitingSubmit) {
+                    const p = awaitingSubmit.submit_preview || {};
+                    const containersText = (p.containers && p.containers.length) ? p.containers.join(", ") : "(none)";
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">Form filled for "${escapeHtml(awaitingSubmit.subject || awaitingSubmit.message_id)}" - review before submitting:
+                            <b>file</b> ${escapeHtml(p.filename || "")}, <b>type</b> ${escapeHtml(p.matched_type || "")},
+                            <b>containers</b> ${escapeHtml(containersText)}, <b>organization</b> ${escapeHtml(p.organization || "(none)")}.</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm &amp; submit</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (awaitingForward) {
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(awaitingForward.subject || awaitingForward.message_id)}" has no organization set on Shypple.
+                            Forward it to <b>${escapeHtml(awaitingForward.forward_to || "")}</b> and move it to <b>label:${escapeHtml(awaitingForward.forward_label || "")}</b>?</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm forward</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (awaitingOrgSwitch) {
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(awaitingOrgSwitch.subject || awaitingOrgSwitch.message_id)}" matched a shipment
+                            (tried: ${escapeHtml((awaitingOrgSwitch.tried_containers || []).join(", "))}) with no organization set under Shypple B.V.
+                            Switch to <b>${escapeHtml(awaitingOrgSwitch.target_org || "Shypple Fresh B.V.")}</b> and re-search the same container(s) there?</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm switch</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (awaitingNoRecord) {
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(awaitingNoRecord.subject || awaitingNoRecord.message_id)}" - no record found on Shypple for any
+                            extracted container (tried: ${escapeHtml((awaitingNoRecord.tried_containers || []).join(", "))}).
+                            Mark unread and move to <b>label:${escapeHtml(awaitingNoRecord.no_record_label || "")}</b>?</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (jobs.find(j => j.status === "awaiting_lcl_container_confirmation")) {
+                    const j = jobs.find(x => x.status === "awaiting_lcl_container_confirmation");
+                    const p = j.container_preview || {};
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - filled on the Containers tab:
+                            <b>container</b> ${escapeHtml(p.container_number || "(none)")}, <b>devanning date</b> ${escapeHtml(p.devanning_date || "(none)")}.
+                            Confirm before editing customs number / CFS and updating the shipment?</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (jobs.find(j => j.status === "awaiting_lcl_delivery_confirmation")) {
+                    const j = jobs.find(x => x.status === "awaiting_lcl_delivery_confirmation");
+                    const p = j.container_tab_preview || {};
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - Containers tab currently shows:
+                            <b>container</b> ${escapeHtml(p.container_number || "(empty)")}, <b>devanning date</b> ${escapeHtml(p.devanning_date || "(empty)")}.
+                            Confirm before moving to the Documents tab to upload the Delivery order?</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (jobs.find(j => j.status === "awaiting_lcl_date_confirmation")) {
+                    const j = jobs.find(x => x.status === "awaiting_lcl_date_confirmation");
+                    const p = j.date_preview || {};
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - devanning date differs:
+                            Shypple has <b>${escapeHtml(p.current || "(empty)")}</b>, email says <b>${escapeHtml(p.extracted || "")}</b>.
+                            Confirm to update it on Shypple?</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm &amp; update</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (jobs.find(j => j.status === "awaiting_lcl_submit_confirmation")) {
+                    const j = jobs.find(x => x.status === "awaiting_lcl_submit_confirmation");
+                    const p = j.submit_preview || {};
+                    const containersText = (p.containers && p.containers.length) ? p.containers.join(", ") : "(none)";
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">Form filled for "${escapeHtml(j.subject || j.message_id)}" - review before submitting:
+                            <b>file</b> ${escapeHtml(p.filename || "")}, <b>type</b> ${escapeHtml(p.matched_type || "")}, <b>containers</b> ${escapeHtml(containersText)}.</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm &amp; submit</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else {
+                    // Nothing is waiting on a decision right now, but the batch can
+                    // still be actively doing work in the automation browser after a
+                    // confirm click (fetching a document, filling the Shypple form,
+                    // submitting) - showing nothing here previously made a confirm
+                    // click that DID register look like it silently did nothing.
+                    const current = (state.current_index >= 0 && jobs[state.current_index]) ? jobs[state.current_index] : null;
+                    if (state.running && current && current.status === "processing") {
+                        banner.innerHTML = `
+                            <div class="process-banner">
+                                <i class="fa-solid fa-spinner fa-spin"></i>
+                                <span class="process-banner-text">"${escapeHtml(current.subject || current.message_id)}" - ${escapeHtml(current.phase || "Working...")}</span>
+                            </div>`;
+                    } else {
+                        banner.innerHTML = "";
+                    }
+                }
+            }
+        }
+
+        const rows = jobs.map(job => {
+            const label = _JOB_STATUS_LABELS[job.status] || job.status || "Queued";
+            const badgeClass = _jobBadgeClass(job.status);
+            const details = [];
+            if (job.flow === "lcl_arrivals") {
+                if (job.sf_number) details.push(`SF Number: ${escapeHtml(job.sf_number)}`);
+                if (job.cluster) details.push(`Cluster: ${escapeHtml(job.cluster)}`);
+                if (job.load_type) details.push(`Load type: ${escapeHtml(job.load_type)}`);
+                if (job.customer_name) details.push(`Customer: ${escapeHtml(job.customer_name)}`);
+                if (job.shypple_devanning_date || job.extracted_devanning_date) {
+                    details.push(`Devanning date - Shypple: ${escapeHtml(job.shypple_devanning_date || "(empty)")}, `
+                        + `email: ${escapeHtml(job.extracted_devanning_date || "(none)")}`);
+                }
+            }
+            if (job.organization) details.push(`Org: ${escapeHtml(job.organization)}`);
+            if (job.missing_containers && job.missing_containers.length) details.push(`Missing containers: ${escapeHtml(job.missing_containers.join(", "))}`);
+            if (job.missing_doc_types && job.missing_doc_types.length) details.push(`Doc type(s) needing upload: ${escapeHtml(job.missing_doc_types.join(", "))}`);
+            if (job.message_id && job.doc_types && job.doc_types.length) {
+                // Reliable local download of the EMAIL's own copy of each document -
+                // sidesteps Shypple's raw document links, which were producing
+                // extension-less files Chrome couldn't open. "Other" is included now
+                // (previously filtered out) - an a-cmr mail's non-Cmr attachment(s) are
+                // real files too. attachment_index (parallel to doc_types) is passed
+                // through so two same-typed attachments (e.g. two "Other" documents)
+                // each link to their own file instead of both resolving to the first.
+                const indices = job.doc_attachment_indices || [];
+                const filenames = job.doc_filenames || [];
+                const downloadLinks = job.doc_types
+                    .map((t, i) => ({ t, idx: indices[i], fn: filenames[i] }))
+                    .filter(({ t }) => t && t !== "No DOC")
+                    .map(({ t, idx, fn }) => {
+                        const idxParam = (idx === null || idx === undefined) ? "" : `&attachment_index=${encodeURIComponent(idx)}`;
+                        const base = `/api/operations/document_file?message_id=${encodeURIComponent(job.message_id)}&doc_type=${encodeURIComponent(t)}${idxParam}&subject=${encodeURIComponent(job.subject || "")}`;
+                        // Shows the email's own attachment filename alongside its doc
+                        // type, not just the type - needed to tell two same-typed
+                        // attachments in a multi-attachment ("double document") mail
+                        // apart at a glance, since fn is looked up per-attachment (via
+                        // idx/filenames, parallel arrays), not shared across the job.
+                        const label = fn ? `${escapeHtml(fn)} (${escapeHtml(t)})` : escapeHtml(t);
+                        return `<span class="job-download-group">`
+                            + `<a class="job-download-link" title="Download the email's own '${escapeHtml(t)}' file" href="${base}">`
+                            + `<i class="fa-solid fa-download"></i> ${label}</a>`
+                            + `<a class="job-download-link" title="View '${escapeHtml(t)}' in the browser" href="${base}&inline=1" target="_blank">`
+                            + `<i class="fa-solid fa-eye"></i> View</a></span>`;
+                    })
+                    .join(" ");
+                if (downloadLinks) details.push(`Download: ${downloadLinks}`);
+            }
+            if (job.downloaded_files && job.downloaded_files.length) {
+                // Local copies of the already-uploaded Shypple document(s) - saved
+                // (see save_document_locally) during the deep-compare step under
+                // their real filename, in this project's downloads folder. "View"
+                // opens it inline in a new tab (e.g. the browser's built-in PDF
+                // viewer) instead of trying to open the raw file in a text editor,
+                // which can't render binary formats like PDF/xlsx.
+                const localLinks = job.downloaded_files
+                    .map(f => {
+                        const base = `/api/operations/local_document/${encodeURIComponent(f.filename)}`;
+                        return `<span class="job-download-group">`
+                            + `<a class="job-download-link" title="Download the locally-saved '${escapeHtml(f.type)}' file from Shypple" href="${base}">`
+                            + `<i class="fa-solid fa-folder-open"></i> ${escapeHtml(f.filename)}</a>`
+                            + `<a class="job-download-link" title="View '${escapeHtml(f.type)}' in the browser" href="${base}?inline=1" target="_blank">`
+                            + `<i class="fa-solid fa-eye"></i> View</a></span>`;
+                    })
+                    .join(" ");
+                if (localLinks) details.push(`Local copy (from Shypple): ${localLinks}`);
+            }
+            if (job.uploaded_count) {
+                details.push(`<span style="color:#0f9d76;"><i class="fa-solid fa-check"></i> Uploaded ${job.uploaded_count} document(s)</span>`);
+            }
+            if (job.upload_failures && job.upload_failures.length) {
+                const failText = job.upload_failures.map(f => `${escapeHtml(f.type)}: ${escapeHtml(f.error || "unknown error")}`).join("; ");
+                details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-triangle-exclamation"></i> Upload failed for: ${failText}</span>`);
+            }
+            if (job.reason) details.push(escapeHtml(job.reason));
+            if (job.error) details.push(escapeHtml(job.error));
+            if (job.no_record_status === "flagged") {
+                details.push('<span style="color:var(--text-muted);"><i class="fa-solid fa-inbox"></i> No record on Shypple - marked unread and moved to label:_0 India shipments</span>');
+            } else if (job.no_record_status === "failed") {
+                details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-xmark"></i> Could not flag as no-record: ${escapeHtml(job.no_record_error || "unknown error")}</span>`);
+            }
+            if (job.star_status === "done") {
+                const starColor = job.star_color || "blue";
+                details.push(`<span style="color:#0f9d76;"><i class="fa-solid fa-star"></i> Marked with a ${starColor} star</span>`);
+            } else if (job.star_status === "failed") {
+                const starColor = job.star_color || "blue";
+                details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-star-half-stroke"></i> ${starColor[0].toUpperCase()}${starColor.slice(1)} star NOT set: ${escapeHtml(job.star_error || "unknown error")}</span>`);
+            }
+            if (job.forward_status === "sent") {
+                details.push('<span style="color:#0f9d76;"><i class="fa-solid fa-check"></i> Email forwarded to nl.importsea@shypple.com and labeled a-release-orders there</span>');
+            } else if (job.forward_status === "sent_not_labeled") {
+                details.push(`<span style="color:#b45309;"><i class="fa-solid fa-triangle-exclamation"></i> Email forwarded to nl.importsea@shypple.com, but NOT labeled there yet (${escapeHtml(job.relabel_error || "unknown reason")}) - use "Label pending release-orders" to retry</span>`);
+            } else if (job.forward_status === "already_forwarded") {
+                details.push('<span style="color:var(--text-muted);"><i class="fa-solid fa-clock-rotate-left"></i> Already forwarded in a previous run - not sent again</span>');
+            } else if (job.forward_status === "failed") {
+                details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-xmark"></i> Email NOT forwarded: ${escapeHtml(job.forward_error || "unknown error")}</span>`);
+            }
+            return `
+                <div class="process-job-row">
+                    <div class="process-job-main">
+                        <span class="process-job-subject">${escapeHtml(job.subject || job.message_id || "")}</span>
+                        <span class="job-badge ${badgeClass}">${escapeHtml(label)}</span>
+                    </div>
+                    ${details.length ? `<div class="process-job-details">${details.join(" &middot; ")}</div>` : ""}
+                </div>`;
+        }).join("");
+
+        const summary = state.running
+            ? `<i class="fa-solid fa-spinner fa-spin"></i> Processing ${jobs.length} email(s)...`
+            : `Done - ${jobs.length} email(s) processed.`;
+
+        panel.innerHTML = `<div class="process-summary">${summary}</div><div class="process-job-list">${rows}</div>`;
+    }
+
+    // Select email list item and update reading view details
+    function selectMail(element) {
+        const id = element.dataset.id;
+        const fromSender = element.dataset.from;
+        const subject = element.dataset.subject;
+        const date = element.dataset.date;
+        const snippet = element.dataset.snippet;
+
+        // Remember which mail is open so the "Deep analyze" button knows its target.
+        window.__openMail = { id: id, subject: subject };
+
+        // Remove selection from all list items
+        const items = document.getElementsByClassName("gmail-row");
+        for (let i = 0; i < items.length; i++) {
+            items[i].classList.remove("selected");
+        }
+
+        // Highlight chosen item
+        element.classList.add("selected");
+
+        // Switch to reader view
+        document.getElementById("mail-list-view").style.display = "none";
+        document.getElementById("mail-reader-view").style.display = "flex";
+
+        // Populate header details
+        document.getElementById("read-subject").innerText = subject;
+        document.getElementById("read-date").innerText = date;
+
+        // Parse email sender name and address
+        let senderName = fromSender;
+        let senderEmail = "";
+
+        const bracketIndex = fromSender.indexOf("<");
+        if (bracketIndex !== -1) {
+            senderName = fromSender.substring(0, bracketIndex).trim();
+            senderEmail = fromSender.substring(bracketIndex);
+        }
+
+        document.getElementById("read-sender-name").innerText = senderName ? senderName : "Unknown";
+        document.getElementById("read-sender-email").innerText = senderEmail;
+
+        // Avatar first letter
+        const firstLetter = senderName ? senderName.charAt(0).toUpperCase() : "?";
+        document.getElementById("read-avatar").innerText = firstLetter;
+
+        // Reflect star state in the reader header
+        const isStarred = element.dataset.starred === 'true';
+        setStarIconState(document.getElementById("read-star"), isStarred);
+
+        // Opening a message marks it read - mirror that locally right away
+        element.dataset.unread = 'false';
+        element.classList.remove('unread');
+        element.classList.add('read');
+
+        // Fetch and show full email body
+        const loader = document.getElementById("body-loader");
+        const contentEl = document.getElementById("email-html-content");
+        const attachmentsBar = document.getElementById("email-attachments");
+        const attachmentsList = document.getElementById("email-attachments-list");
+
+        loader.style.display = "block";
+        contentEl.style.display = "none";
+        attachmentsBar.style.display = "none";
+        attachmentsList.innerHTML = "";
+
+        // Kick off document-type identification in parallel (read-only, never marks read)
+        classifyDocuments(id);
+
+        const fetchUrl = `/api/emails/body?id=${encodeURIComponent(id)}&subject=${encodeURIComponent(subject)}&sender=${encodeURIComponent(fromSender)}&date=${encodeURIComponent(date)}`;
+        fetch(fetchUrl)
+            .then(res => res.json())
+            .then(data => {
+                loader.style.display = "none";
+                contentEl.style.display = "block";
+                if (data.success && data.body) {
+                    // Sanitize sender-controlled HTML before inserting into the page DOM
+                    contentEl.innerHTML = DOMPurify.sanitize(data.body, { ADD_ATTR: ['target'] });
+                    renderAttachments(data.attachments || []);
+                } else {
+                    contentEl.innerHTML = `<div style="color:#4B5563;">${escapeHtml(snippet)}</div>`;
+                }
+            })
+            .catch(err => {
+                loader.style.display = "none";
+                contentEl.style.display = "block";
+                contentEl.innerHTML = `<div style="color:#B91C1C;">Error fetching email content: ${escapeHtml(String(err))}</div>`;
+            });
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.innerText = str;
+        return div.innerHTML;
+    }
+
+    function attachmentIconClass(filename) {
+        const ext = (filename.split('.').pop() || '').toLowerCase();
+        if (ext === 'pdf') return 'fa-file-pdf';
+        if (['doc', 'docx'].includes(ext)) return 'fa-file-word';
+        if (['xls', 'xlsx', 'csv'].includes(ext)) return 'fa-file-excel';
+        if (['ppt', 'pptx'].includes(ext)) return 'fa-file-powerpoint';
+        if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return 'fa-file-image';
+        if (['zip', 'rar', '7z'].includes(ext)) return 'fa-file-zipper';
+        return 'fa-file';
+    }
+
+    function renderAttachments(attachments) {
+        const attachmentsBar = document.getElementById("email-attachments");
+        const attachmentsList = document.getElementById("email-attachments-list");
+        // Attachments referenced inline in the body (e.g. embedded images) don't need a separate chip
+        const docAttachments = attachments.filter(a => !a.contentId && a.url);
+        if (docAttachments.length === 0) {
+            attachmentsBar.style.display = "none";
+            return;
+        }
+        attachmentsBar.style.display = "block";
+        attachmentsList.innerHTML = docAttachments.map(att => `
+            <a class="attachment-chip" href="${att.url}" target="_blank" rel="noopener">
+                <i class="fa-solid ${attachmentIconClass(att.filename)}"></i>
+                <span>${escapeHtml(att.filename)} <span class="attachment-size">${escapeHtml(att.size || '')}</span></span>
+            </a>
+        `).join('');
+    }
+
+    // Identify the document type of the email body + each attachment. Runs entirely
+    // through the read-only /api/emails/classify endpoint, so it never changes the
+    // mail's read/unread state. Scraped ('pw_') mailbox ids are skipped server-side.
+    function classifyDocuments(id) {
+        const panel = document.getElementById("email-doctypes");
+        const summary = document.getElementById("email-doctype-summary");
+        const list = document.getElementById("email-doctype-list");
+        if (!panel) return;
+
+        if (String(id).startsWith("pw_")) {
+            panel.style.display = "none";
+            return;
+        }
+
+        panel.style.display = "block";
+        list.innerHTML = "";
+        summary.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Identifying document types...';
+
+        fetch("/api/emails/classify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: id })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    summary.innerHTML = `<span class="doctype-error">${escapeHtml(data.error || "Classification failed.")}</span>`;
+                    return;
+                }
+                renderDocTypes(data);
+            })
+            .catch(err => {
+                summary.innerHTML = `<span class="doctype-error">Classification error: ${escapeHtml(String(err))}</span>`;
+            });
+    }
+
+    // DEEP scan of the currently open mail: reads the real document bytes (every page)
+    // so it can use a keyword printed inside the document and split a multi-document PDF.
+    // For the delegated (scraped) mailbox this downloads attachments via the browser and
+    // CAN mark the mail read - the mail is already open here, so that's expected.
+    function deepAnalyzeCurrent() {
+        const open = window.__openMail || {};
+        if (!open.id) return;
+
+        const panel = document.getElementById("email-doctypes");
+        const summary = document.getElementById("email-doctype-summary");
+        const list = document.getElementById("email-doctype-list");
+        const btn = document.getElementById("deep-analyze-btn");
+        panel.style.display = "block";
+        list.innerHTML = "";
+        summary.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Deep-reading document pages...';
+        if (btn) { btn.disabled = true; btn.style.opacity = "0.6"; }
+
+        const labelBox = document.getElementById("label-input");
+        const currentLabel = (labelBox ? labelBox.value.trim() : "") || "a-cmr";
+        fetch("/api/emails/deep_classify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: open.id, subject: open.subject || "", label: currentLabel })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    summary.innerHTML = `<span class="doctype-error">${escapeHtml(data.error || "Deep analysis failed.")}</span>`;
+                    return;
+                }
+                renderDocTypes(data);
+                // Reflect ALL resolved document types on the list-row badges too.
+                if (data.email_type) {
+                    window.docTypes[open.id] = data.email_type;
+                    window.docTypesAll[open.id] = (data.doc_types && data.doc_types.length) ? data.doc_types : [data.email_type];
+                    if (data.containers && data.containers.length) window.docContainers[open.id] = data.containers;
+                    if (data.type_counts) window.docTypeCounts[open.id] = data.type_counts;
+                    annotateRowDocTypes();
+                }
+            })
+            .catch(err => {
+                summary.innerHTML = `<span class="doctype-error">Deep analysis error: ${escapeHtml(String(err))}</span>`;
+            })
+            .finally(() => { if (btn) { btn.disabled = false; btn.style.opacity = "1"; } });
+    }
+
+    function docTypeBadge(type, confidence) {
+        const isOther = !type || type === "Other";
+        const conf = (confidence || confidence === 0) ? ` <span class="doctype-conf">${Math.round(confidence * 100)}%</span>` : "";
+        return `<span class="doctype-badge${isOther ? " is-other" : ""}"><i class="fa-solid fa-tag"></i>${escapeHtml(type || "Other")}</span>${conf}`;
+    }
+
+    // Render container-number chips (ISO 6346) for a list like ["TEMU9681744", ...].
+    function containerChips(list) {
+        if (!list || !list.length) return "";
+        return `<span class="container-chips"><i class="fa-solid fa-box" title="Container numbers"></i>`
+            + list.map(c => `<span class="container-chip">${escapeHtml(c)}</span>`).join("")
+            + `</span>`;
+    }
+
+    function renderDocTypes(data) {
+        const summary = document.getElementById("email-doctype-summary");
+        const list = document.getElementById("email-doctype-list");
+        const docs = data.documents || [];
+
+        summary.innerHTML = `Email type: ${docTypeBadge(data.email_type, null)}`
+            + (data.containers && data.containers.length
+                ? `<div class="doctype-containers">Containers: ${containerChips(data.containers)}</div>` : "");
+
+        list.innerHTML = docs.map(d => {
+            const label = d.source === "body" ? "Email body" : (d.filename || "Attachment");
+            // Show the page range when a single attachment yielded several typed sub-documents.
+            const pg = d.pages && !["-", "all", ""].includes(String(d.pages).toLowerCase())
+                ? ` <span class="doctype-pages" title="Pages">p.${escapeHtml(String(d.pages))}</span>` : "";
+            return `
+                <div class="doctype-row">
+                    <span class="doctype-source" title="${escapeHtml(label)}">
+                        <i class="fa-solid ${d.source === "body" ? "fa-envelope-open-text" : "fa-file"}"></i>
+                        ${escapeHtml(label)}${pg}
+                    </span>
+                    <span class="doctype-rowright">${docTypeBadge(d.type, d.confidence)}${containerChips(d.containers)}</span>
+                </div>`;
+        }).join("");
+    }
+
+    // ----- Bulk document-type identification for every mail in the label -----
+    // Uses list-view metadata only (subject, snippet, attachment names) so NO mail is
+    // opened and read/unread state is never changed. Results show in a modal, as inline
+    // row badges, in the browser console, and in the server terminal.
+    window.docTypes = window.docTypes || {};        // id -> primary type (string)
+    window.docTypesAll = window.docTypesAll || {};   // id -> [every distinct doc type in the mail]
+    window.docContainers = window.docContainers || {}; // id -> [container numbers]
+    window.docTypeCounts = window.docTypeCounts || {}; // id -> {type: instance count}, from Deep analyze/metadata
+
+    function classifyAllDocuments() {
+        const btn = document.getElementById("classify-all-btn");
+        const original = btn.innerHTML;
+        btn.disabled = true;
+        btn.style.opacity = "0.7";
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Identifying...';
+
+        const labelBox = document.getElementById("label-input");
+        const currentLabel = (labelBox ? labelBox.value.trim() : "") || "a-cmr";
+        // CMR and LCL each have their own dedicated endpoint (classify_all_documents_cmr
+        // / classify_all_documents_lcl in tracking_api.py) - no shared branching, same
+        // separation as processSelectedMails' processLclSelectedMails() split.
+        const endpoint = currentLabel === "lcl-arrivals---release"
+            ? "/api/emails/classify_all_lcl"
+            : "/api/emails/classify_all";
+
+        fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({})
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    showToast(data.error || "Document-type identification failed.", true);
+                    return;
+                }
+                (data.results || []).forEach(r => {
+                    window.docTypes[r.id] = r.type;
+                    window.docTypesAll[r.id] = (r.types && r.types.length) ? r.types : [r.type];
+                    if (r.containers && r.containers.length) window.docContainers[r.id] = r.containers;
+                    if (r.type_counts) window.docTypeCounts[r.id] = r.type_counts;
+                });
+                console.groupCollapsed(`[DocType] ${data.count}/${data.total} unread mail(s) classified (${data.total_documents || 0} doc(s))`);
+                (data.results || []).forEach(r => console.log(`${r.type} (${r.doc_count || 1} doc(s)) <- ${r.subject}`));
+                console.groupEnd();
+                annotateRowDocTypes();
+                renderDocTypesModal(data);
+                const scopeWord = data.scope || "unread";
+                showToast(`Found ${data.unread_count ?? data.count ?? 0} ${scopeWord} mail(s) in ${data.label || currentLabel} (${data.total_documents ?? 0} document(s) total).`);
+            })
+            .catch(err => showToast("Error: " + err, true))
+            .finally(() => {
+                btn.disabled = false;
+                btn.style.opacity = "1";
+                btn.innerHTML = original;
+            });
+    }
+
+    function renderDocTypesModal(data) {
+        const summary = document.getElementById("doctypes-summary");
+        const tbody = document.getElementById("doctypes-tbody");
+
+        const unreadCount = data.unread_count ?? data.total ?? data.count ?? 0;
+        const totalDocs = data.total_documents ?? (data.results || []).reduce((acc, r) => acc + (r.doc_count || 1), 0);
+        const entries = Object.entries(data.summary || {}).sort((a, b) => b[1] - a[1]);
+        const labelBox = document.getElementById("label-input");
+        const shownLabel = data.label || (labelBox ? labelBox.value.trim() : "") || "a-cmr";
+        const scopeLabel = data.scope === "not yellow-starred" ? "Non-Starred Mails" : "Unread Mails";
+
+        summary.innerHTML = `<span class="summary-chip" style="background:#e8f0fe; color:#1a73e8; border:1px solid #aecbfa;"><i class="fa-solid fa-envelope"></i> ${scopeLabel} in ${escapeHtml(shownLabel)}: <b>${unreadCount}</b></span>` +
+            `<span class="summary-chip" style="background:#e6f4ea; color:#137333; border:1px solid #ceead6;"><i class="fa-solid fa-file-lines"></i> Total Documents: <b>${totalDocs}</b></span>` +
+            entries.map(([t, n]) => `<span class="summary-chip">${escapeHtml(t)}<b>${n}</b></span>`).join("");
+
+        tbody.innerHTML = (data.results || []).map((r, i) => {
+            const conf = Math.round((r.confidence || 0) * 100);
+            const types = (r.types && r.types.length) ? r.types : [r.type];
+            const tCounts = r.type_counts || {};
+            const docCount = r.doc_count || (r.attachments ? r.attachments.length : 1);
+
+            let badges = "";
+            if (r.attachments && r.attachments.length) {
+                badges = r.attachments.map((att, attIdx) => {
+                    const fname = att.filename || "Attachment";
+                    const t = att.type || "Other";
+                    const isOther = !t || t === "Other" || t === "No DOC";
+                    const onclickAttr = `onclick="openDocFile('${escapeHtml(r.id || '')}', '${escapeHtml(t)}', '${escapeHtml(r.subject || '')}', ${attIdx})"`;
+                    return `<div style="margin-bottom:4px; display:flex; align-items:center; gap:8px;">
+                        <span style="font-size:0.78rem; color:#1a73e8; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500; cursor:pointer;" title="Click to view ${escapeHtml(fname)}" ${onclickAttr}><i class="fa-solid fa-file-pdf" style="color:#d93025; margin-right:3px;"></i>${escapeHtml(fname)}</span>
+                        <span class="row-doctype-badge ${isOther ? "is-other" : ""} clickable-doc-badge" ${onclickAttr} title="Click to open ${escapeHtml(t)} document"><i class="fa-solid fa-arrow-up-right-from-square" style="font-size:0.7rem; margin-right:3px;"></i>${escapeHtml(t)}</span>
+                    </div>`;
+                }).join("");
+            } else {
+                badges = types.map((t, tIdx) => {
+                    const isOther = !t || t === "Other" || t === "No DOC";
+                    const n = tCounts[t];
+                    const countTag = (n && n > 1) ? ` <span class="row-doctype-count">×${n}</span>` : "";
+                    const onclickAttr = `onclick="openDocFile('${escapeHtml(r.id || '')}', '${escapeHtml(t)}', '${escapeHtml(r.subject || '')}', ${tIdx})"`;
+                    return `<span class="row-doctype-badge ${isOther ? "is-other" : ""} clickable-doc-badge" ${onclickAttr} title="Click to open ${escapeHtml(t)} document"><i class="fa-solid fa-arrow-up-right-from-square" style="font-size:0.7rem; margin-right:3px;"></i>${escapeHtml(t)}${countTag}</span>`;
+                }).join(" ");
+            }
+
+            const cont = (r.containers && r.containers.length)
+                ? `<div class="dt-containers">${containerChips(r.containers)}</div>` : "";
+            return `<tr>
+                <td>${i + 1}</td>
+                <td class="dt-sender">${escapeHtml(r.sender || "")}</td>
+                <td class="dt-subject">${escapeHtml(r.subject || "")}${cont}</td>
+                <td style="white-space:nowrap;"><span class="row-doctype-badge" style="background:#f1f3f4; color:#3c4043; border:1px solid #dadce0;"><i class="fa-solid fa-paperclip"></i> ${docCount} doc(s)</span></td>
+                <td>${badges}</td>
+                <td class="dt-conf">${conf}%</td>
+            </tr>`;
+        }).join("");
+
+        document.getElementById("doctypes-modal").style.display = "flex";
+    }
+
+    function openDocFile(messageId, docType, subject, attachmentIndex) {
+        if (!messageId) return;
+        let url = `/api/operations/document_file?message_id=${encodeURIComponent(messageId)}&doc_type=${encodeURIComponent(docType)}&inline=1`;
+        if (subject) {
+            url += `&subject=${encodeURIComponent(subject)}`;
+        }
+        if (attachmentIndex !== undefined && attachmentIndex !== null) {
+            url += `&attachment_index=${encodeURIComponent(attachmentIndex)}`;
+        }
+        window.open(url, '_blank');
+    }
+
+    function closeDocTypesModal() {
+        document.getElementById("doctypes-modal").style.display = "none";
+    }
+
+    // ----- Forwarded-mails list (entity view for "Label pending release-orders") -----
+    // Shows every mail in the forwarded-mail tracker (data/forwarded_mails.json) -
+    // both already labeled in nl.importsea@shypple.com and still pending - with a
+    // per-row delete to forget a stale/mistaken entry (doesn't touch Gmail itself).
+    function viewForwardedMails() {
+        const modal = document.getElementById("forwarded-mails-modal");
+        const summary = document.getElementById("forwarded-mails-summary");
+        const tbody = document.getElementById("forwarded-mails-tbody");
+        if (summary) summary.innerHTML = '<span class="summary-chip"><i class="fa-solid fa-spinner fa-spin"></i> Loading</span>';
+        if (tbody) tbody.innerHTML = "";
+        if (modal) modal.style.display = "flex";
+
+        fetch("/api/operations/forwarded_mails")
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    if (summary) summary.innerHTML = `<span class="summary-chip" style="color:#dc2626;">${escapeHtml(data.error || "Failed to load.")}</span>`;
+                    return;
+                }
+                renderForwardedMailsTable(data.items || []);
+            })
+            .catch(err => { if (summary) summary.innerHTML = `<span class="summary-chip" style="color:#dc2626;">Error: ${escapeHtml(String(err))}</span>`; });
+    }
+
+    function renderForwardedMailsTable(items) {
+        const summary = document.getElementById("forwarded-mails-summary");
+        const tbody = document.getElementById("forwarded-mails-tbody");
+        const labeledCount = items.filter(i => i.relabeled).length;
+        if (summary) {
+            summary.innerHTML = `<span class="summary-chip">Total<b>${items.length}</b></span>`
+                + `<span class="summary-chip">Labeled<b>${labeledCount}</b></span>`
+                + `<span class="summary-chip">Pending<b>${items.length - labeledCount}</b></span>`;
+        }
+        if (!tbody) return;
+        if (!items.length) {
+            tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No forwarded mails tracked yet.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = items.map((item, i) => {
+            const labeledBadge = item.relabeled
+                ? '<span class="row-doctype-badge" style="background:#e6f4ea; color:#0f9d76; border-color:#c8e6d4;">Labeled</span>'
+                : '<span class="row-doctype-badge is-other">Pending</span>';
+            const when = (item.forwarded_at || "").replace("T", " ").replace("Z", " UTC");
+            return `<tr>
+                <td>${i + 1}</td>
+                <td class="dt-subject">${escapeHtml(item.subject || "(no subject stored)")}</td>
+                <td>${escapeHtml(when)}</td>
+                <td>${labeledBadge}</td>
+                <td><button class="gmail-action-btn" title="Remove from tracker" data-mail-id="${escapeHtml(item.id)}" onclick="deleteForwardedMail(this)"><i class="fa-solid fa-trash" style="color:#dc2626;"></i></button></td>
+            </tr>`;
+        }).join("");
+    }
+
+    async function deleteForwardedMail(btn) {
+        const id = btn.dataset.mailId;
+        if (!id) return;
+        const ok = await confirmDialog("Remove this mail from the forwarded-mail tracker? This does not un-forward or un-label it in Gmail - it only forgets the tracking record.");
+        if (!ok) return;
+        btn.disabled = true;
+        fetch("/api/operations/forwarded_mails/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message_id: id })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) { showToast(data.error || "Failed to delete.", true); btn.disabled = false; return; }
+                viewForwardedMails(); // refresh the list from the server
+            })
+            .catch(err => { showToast("Error: " + err, true); btn.disabled = false; });
+    }
+
+    function closeForwardedMailsModal() {
+        document.getElementById("forwarded-mails-modal").style.display = "none";
+    }
+
+    // ----- Document-type classification history (data/doc_classifications.json), for
+    // whichever label the dashboard is currently on - CMR and LCL each have their own
+    // dedicated backend endpoint per-request (see tracking_api.py's
+    // classification_history/_clear/_delete), no shared branching, same separation as
+    // classifyAllDocuments' CMR/LCL split. -----
+    function _currentLabelForHistory() {
+        const labelBox = document.getElementById("label-input");
+        return (labelBox ? labelBox.value.trim() : "") || "a-cmr";
+    }
+
+    function viewClassificationHistory() {
+        const modal = document.getElementById("classification-history-modal");
+        const summary = document.getElementById("classification-history-summary");
+        const tbody = document.getElementById("classification-history-tbody");
+        if (summary) summary.innerHTML = '<span class="summary-chip"><i class="fa-solid fa-spinner fa-spin"></i> Loading</span>';
+        if (tbody) tbody.innerHTML = "";
+        if (modal) modal.style.display = "flex";
+
+        const label = _currentLabelForHistory();
+        fetch(`/api/emails/classification_history?label=${encodeURIComponent(label)}`)
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    if (summary) summary.innerHTML = `<span class="summary-chip" style="color:#dc2626;">${escapeHtml(data.error || "Failed to load.")}</span>`;
+                    return;
+                }
+                renderClassificationHistoryTable(data.results || [], label);
+            })
+            .catch(err => { if (summary) summary.innerHTML = `<span class="summary-chip" style="color:#dc2626;">Error: ${escapeHtml(String(err))}</span>`; });
+    }
+
+    function renderClassificationHistoryTable(items, label) {
+        window.__classificationHistoryLabel = label;
+        const summary = document.getElementById("classification-history-summary");
+        const tbody = document.getElementById("classification-history-tbody");
+        if (summary) {
+            summary.innerHTML = `<span class="summary-chip"><i class="fa-solid fa-tag"></i> Label: <b>${escapeHtml(label)}</b></span>`
+                + `<span class="summary-chip"><i class="fa-solid fa-list-check"></i> Classified: <b>${items.length}</b></span>`;
+        }
+        if (!tbody) return;
+        if (!items.length) {
+            tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--text-muted);">No document types found/classified yet for this label.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = items.map((item, i) => {
+            const when = (item.classified_at || "").replace("T", " ").replace("Z", " UTC");
+            return `<tr>
+                <td>${i + 1}</td>
+                <td class="dt-subject">${escapeHtml(item.sender || "")}</td>
+                <td class="dt-subject">${escapeHtml(item.subject || item.id || "")}</td>
+                <td>${item.doc_count ?? (item.types || []).length}</td>
+                <td>${(item.types && item.types.length ? item.types : [item.type]).map(t => docTypeBadge(t, null)).join(" ")}</td>
+                <td>${containerChips(item.containers) || '<span style="color:var(--text-muted);">—</span>'}</td>
+                <td>${escapeHtml(when || "—")}</td>
+                <td><button class="gmail-action-btn" title="Delete this mail's cached document type" data-mail-id="${escapeHtml(item.id)}" onclick="deleteClassificationHistoryItem(this)"><i class="fa-solid fa-trash" style="color:#dc2626;"></i></button></td>
+            </tr>`;
+        }).join("");
+    }
+
+    async function deleteClassificationHistoryItem(btn) {
+        const id = btn.dataset.mailId;
+        if (!id) return;
+        const ok = await confirmDialog("Delete this mail's cached document type? The next Find Document Types / Process will re-identify it from scratch.");
+        if (!ok) return;
+        btn.disabled = true;
+        fetch("/api/emails/classification_history/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message_id: id })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) { showToast(data.error || "Failed to delete.", true); btn.disabled = false; return; }
+                delete window.docTypes[id];
+                delete window.docTypesAll[id];
+                delete window.docContainers[id];
+                delete window.docTypeCounts[id];
+                annotateRowDocTypes();
+                viewClassificationHistory(); // refresh the list from the server
+            })
+            .catch(err => { showToast("Error: " + err, true); btn.disabled = false; });
+    }
+
+    async function clearClassificationHistory() {
+        const label = window.__classificationHistoryLabel || _currentLabelForHistory();
+        const ok = await confirmDialog(`Delete ALL cached document types for "${label}"? Every mail in this label will need to be re-identified from scratch (Find Document Types / Process).`);
+        if (!ok) return;
+        fetch("/api/emails/classification_history/clear", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) { showToast(data.error || "Failed to clear.", true); return; }
+                window.docTypes = {};
+                window.docTypesAll = {};
+                window.docContainers = {};
+                window.docTypeCounts = {};
+                annotateRowDocTypes();
+                showToast(`Cleared ${data.removed ?? 0} cached document type(s) for "${label}".`);
+                viewClassificationHistory();
+            })
+            .catch(err => showToast("Error: " + err, true));
+    }
+
+    function closeClassificationHistoryModal() {
+        document.getElementById("classification-history-modal").style.display = "none";
+    }
+
+    // Paint the cached document-type badge (and container-number chips) onto each
+    // visible mail row. Safe to call repeatedly (after a live refresh rebuilds the
+    // rows, for instance).
+    function annotateRowDocTypes() {
+        document.querySelectorAll(".gmail-row").forEach(row => {
+            const id = row.dataset.id;
+            const content = row.querySelector(".gmail-col-content");
+            if (!content) return;
+            let wrap = content.querySelector(".row-doctype-badges");
+            // Prefer the full list of document types; fall back to the single primary.
+            const types = (window.docTypesAll[id] && window.docTypesAll[id].length)
+                ? window.docTypesAll[id]
+                : (window.docTypes[id] ? [window.docTypes[id]] : null);
+            if (types && types.length) {
+                if (!wrap) {
+                    wrap = document.createElement("span");
+                    wrap.className = "row-doctype-badges";
+                    content.insertBefore(wrap, content.firstChild);
+                }
+                const counts = window.docTypeCounts[id] || {};
+                let totalDocCount = 0;
+                if (Object.keys(counts).length > 0) {
+                    totalDocCount = Object.values(counts).reduce((a, b) => a + (parseInt(b) || 0), 0);
+                }
+                if (!totalDocCount) {
+                    totalDocCount = types.length;
+                }
+
+                wrap.innerHTML = types.map(t => {
+                    const isOther = t === "Other" || t === "No DOC";
+                    // Only show a count once we actually know the per-document breakdown
+                    // (from Deep analyze, or metadata that resolved real per-file types) -
+                    // never guess a count from a single mail-level type.
+                    const n = counts[t];
+                    const countTag = (n && n > 1) ? ` <span class="row-doctype-count">×${n}</span>` : "";
+                    return `<span class="row-doctype-badge${isOther ? " is-other" : ""}">${escapeHtml(t)}${countTag}</span>`;
+                }).join("") + (totalDocCount >= 2 ? ` <span class="row-doctype-badge" style="background:#e0e7ff; color:#3730a3; border:1px solid #c7d2fe; font-weight:600;"><i class="fa-solid fa-copy" style="margin-right:3px;"></i>${totalDocCount} docs</span>` : "");
+            } else if (wrap) {
+                wrap.remove();
+                wrap = null;
+            }
+
+            // Container numbers - same automatic classify_new pass already fetches these
+            // into window.docContainers, they just weren't painted onto the row before.
+            let contWrap = content.querySelector(".row-container-chips");
+            const containers = window.docContainers[id];
+            if (containers && containers.length) {
+                if (!contWrap) {
+                    contWrap = document.createElement("span");
+                    contWrap.className = "row-container-chips";
+                    content.insertBefore(contWrap, wrap ? wrap.nextSibling : content.firstChild);
+                }
+                contWrap.innerHTML = containerChips(containers);
+            } else if (contWrap) {
+                contWrap.remove();
+            }
+        });
+    }
+
+    function backToList() {
+        document.getElementById("mail-reader-view").style.display = "none";
+        document.getElementById("mail-list-view").style.display = "flex";
+    }
+
+    function setStarIconState(iconEl, starred) {
+        if (!iconEl) return;
+        iconEl.classList.toggle('starred', starred);
+        iconEl.classList.toggle('fa-solid', starred);
+        iconEl.classList.toggle('fa-regular', !starred);
+    }
+
+    // Shared POST helper for star/read/archive/delete - the backend routes each
+    // request to the Gmail API (real message ids) or the delegated-mailbox browser
+    // automation (scraped ids) automatically.
+    function postEmailAction(rowEl, action) {
+        return fetch('/api/emails/action', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: action,
+                id: rowEl.dataset.id,
+                subject: rowEl.dataset.subject,
+                sender: rowEl.dataset.from,
+                date: rowEl.dataset.date
+            })
+        }).then(res => res.json());
+    }
+
+    // Marking read is folded into starring (see toggleStarAction/toggleStarReaderAction
+    // below) rather than into postEmailAction itself, since unstarring must NOT trigger
+    // this - only the star->on transition should.
+    function markRowRead(rowEl) {
+        if (!rowEl || rowEl.dataset.unread !== 'true') return;
+        rowEl.dataset.unread = 'false';
+        rowEl.classList.remove('unread');
+        rowEl.classList.add('read');
+        postEmailAction(rowEl, 'mark_read').then(data => {
+            if (!data.success) {
+                showToast('Starred, but failed to mark as read: ' + (data.error || data.message || 'Unknown error'), true);
+                fetchEmailsLive();
+            }
+        }).catch(err => showToast('Starred, but error marking as read: ' + err, true));
+    }
+
+    function toggleStarAction(event, rowEl) {
+        event.stopPropagation();
+        if (!rowEl) return;
+        const starIcon = event.currentTarget;
+        const wasStarred = rowEl.dataset.starred === 'true';
+        const action = wasStarred ? 'unstar' : 'star';
+
+        // Optimistic update across both the list row and the reader header (if open)
+        rowEl.dataset.starred = wasStarred ? 'false' : 'true';
+        setStarIconState(starIcon, !wasStarred);
+        if (rowEl.classList.contains('selected')) {
+            setStarIconState(document.getElementById('read-star'), !wasStarred);
+        }
+
+        postEmailAction(rowEl, action).then(data => {
+            if (!data.success) {
+                rowEl.dataset.starred = wasStarred ? 'true' : 'false';
+                setStarIconState(starIcon, wasStarred);
+                if (rowEl.classList.contains('selected')) {
+                    setStarIconState(document.getElementById('read-star'), wasStarred);
+                }
+                showToast('Failed to update star: ' + (data.error || data.message || 'Unknown error'), true);
+                return;
+            }
+            if (action === 'star') {
+                markRowRead(rowEl);
+            }
+        }).catch(err => showToast('Error updating star: ' + err, true));
+    }
+
+    function toggleStarReaderAction() {
+        const row = document.querySelector('.gmail-row.selected');
+        if (!row) return;
+        const starIcon = document.getElementById('read-star');
+        const wasStarred = row.dataset.starred === 'true';
+        const action = wasStarred ? 'unstar' : 'star';
+
+        row.dataset.starred = wasStarred ? 'false' : 'true';
+        setStarIconState(starIcon, !wasStarred);
+        const listStar = row.querySelector('.gmail-star');
+        if (listStar) setStarIconState(listStar, !wasStarred);
+
+        postEmailAction(row, action).then(data => {
+            if (!data.success) {
+                row.dataset.starred = wasStarred ? 'true' : 'false';
+                setStarIconState(starIcon, wasStarred);
+                if (listStar) setStarIconState(listStar, wasStarred);
+                showToast('Failed to update star: ' + (data.error || data.message || 'Unknown error'), true);
+                return;
+            }
+            if (action === 'star') markRowRead(row);
+        }).catch(err => showToast('Error updating star: ' + err, true));
+    }
+
+    function toggleReadRowAction(rowEl) {
+        if (!rowEl) return;
+        const wasUnread = rowEl.dataset.unread === 'true';
+        const action = wasUnread ? 'mark_read' : 'mark_unread';
+
+        rowEl.dataset.unread = wasUnread ? 'false' : 'true';
+        rowEl.classList.toggle('unread', !wasUnread);
+        rowEl.classList.toggle('read', wasUnread);
+
+        postEmailAction(rowEl, action).then(data => {
+            if (!data.success) {
+                showToast('Failed to update read status: ' + (data.error || data.message || 'Unknown error'), true);
+                fetchEmailsLive();
+            }
+        }).catch(err => showToast('Error updating read status: ' + err, true));
+    }
+
+    function archiveRowAction(rowEl) {
+        if (!rowEl) return;
+        postEmailAction(rowEl, 'archive').then(data => {
+            if (data.success) {
+                rowEl.remove();
+            } else {
+                showToast('Failed to archive: ' + (data.error || data.message || 'Unknown error'), true);
+            }
+        }).catch(err => showToast('Error archiving: ' + err, true));
+    }
+
+    async function deleteRowAction(rowEl) {
+        if (!rowEl) return;
+        const ok = await confirmDialog('Delete this email? This moves it to Trash.');
+        if (!ok) return;
+        postEmailAction(rowEl, 'delete').then(data => {
+            if (data.success) {
+                rowEl.remove();
+            } else {
+                showToast('Failed to delete: ' + (data.error || data.message || 'Unknown error'), true);
+            }
+        }).catch(err => showToast('Error deleting: ' + err, true));
+    }
+
+    function archiveReaderAction() {
+        const row = document.querySelector('.gmail-row.selected');
+        if (!row) return;
+        postEmailAction(row, 'archive').then(data => {
+            if (data.success) {
+                row.remove();
+                backToList();
+            } else {
+                showToast('Failed to archive: ' + (data.error || data.message || 'Unknown error'), true);
+            }
+        }).catch(err => showToast('Error archiving: ' + err, true));
+    }
+
+    async function deleteReaderAction() {
+        const row = document.querySelector('.gmail-row.selected');
+        if (!row) return;
+        const ok = await confirmDialog('Delete this email? This moves it to Trash.');
+        if (!ok) return;
+        postEmailAction(row, 'delete').then(data => {
+            if (data.success) {
+                row.remove();
+                backToList();
+            } else {
+                showToast('Failed to delete: ' + (data.error || data.message || 'Unknown error'), true);
+            }
+        }).catch(err => showToast('Error deleting: ' + err, true));
+    }
+
+    function updateLabel() {
+        const label = document.getElementById('label-input').value.trim();
+        if (label) {
+            window.location.search = `?label=${encodeURIComponent(label)}`;
+        }
+    }
+
+    // Version of the dashboard shell this tab was rendered with. If the server's
+    // template later changes, the open tab (which only re-fetches the mail list via
+    // AJAX, never the shell) would otherwise show stale toolbar buttons "missing".
+    const LOADED_UI_VERSION = "{{ ui_version }}";
+
+    // Set true for the duration of any long-running admin action (star routing,
+    // Shypple processing) so checkForShellUpdate below doesn't reload the page out
+    // from under an in-flight request - that reload aborts the fetch client-side
+    // ("TypeError: Failed to fetch") even though the action keeps running and
+    // completes fine server-side, which read as "it worked but showed an error."
+    window.__longActionInFlight = false;
+
+    function checkForShellUpdate() {
+        if (window.__longActionInFlight) return;
+        fetch('/api/ui_version', { cache: 'no-store' })
+            .then(res => res.json())
+            .then(data => {
+                if (window.__longActionInFlight) return;
+                if (data && data.version && data.version !== LOADED_UI_VERSION) {
+                    // The UI changed on the server - reload to pick up the new shell.
+                    window.location.reload();
+                }
+            })
+            .catch(() => { });
+    }
+
+    // Call immediately on page load, and auto-refresh emails every 10 seconds in the background
+    fetchEmailsLive();
+    setInterval(fetchEmailsLive, 10000);
+    setInterval(checkForShellUpdate, 10000);
+
+    // Run auto-classification every 5 seconds to identify document types for newly arrived mails
+    setInterval(() => {
+        if (!window.__autoClassifyBusy && document.querySelectorAll('.gmail-row').length > 0) {
+            autoClassifyNewMails();
+        }
+    }, 5000);
+
+    // Start real-time email monitoring
+    fetch('/api/emails/monitor/start', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                console.log('[RealTime] Email monitoring started');
+                connectToEmailStream();
+            }
+        })
+        .catch(err => console.error('[RealTime] Failed to start monitoring:', err));
+
+    // Connect to real-time email stream
+    function connectToEmailStream() {
+        const clientId = 'client_' + Math.random().toString(36).substr(2, 9);
+        const eventSource = new EventSource(`/api/emails/stream?client_id=${clientId}`);
+
+        eventSource.addEventListener('new_emails_arrived', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('[RealTime] New emails arrived:', data.count);
+                fetchEmailsLive();
+                if (data.emails && data.emails.length > 0) {
+                    const newIds = data.emails.map(e => e.id);
+                    autoClassifySpecificEmails(newIds);
+                }
+            } catch (err) {
+                console.error('[RealTime] Error parsing event:', err);
+            }
+        });
+
+        eventSource.addEventListener('classification_updated', (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('[RealTime] Classifications updated');
+                if (data.classifications) {
+                    Object.assign(window.docTypes, data.classifications);
+                    annotateRowDocTypes();
+                }
+            } catch (err) {
+                console.error('[RealTime] Error parsing classification event:', err);
+            }
+        });
+
+        eventSource.onerror = (err) => {
+            console.error('[RealTime] Stream error:', err);
+            eventSource.close();
+            setTimeout(connectToEmailStream, 5000);
+        };
+    }
+
+    // Auto-classify specific emails
+    function autoClassifySpecificEmails(emailIds) {
+        if (!emailIds || emailIds.length === 0) return;
+        
+        fetch('/api/emails/auto_classify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email_ids: emailIds })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success && data.classifications) {
+                    Object.keys(data.classifications).forEach(id => {
+                        const classification = data.classifications[id];
+                        window.docTypes[id] = classification.type;
+                        if (classification.containers) {
+                            window.docContainers[id] = classification.containers;
+                        }
+                    });
+                    annotateRowDocTypes();
+                    console.log(`[RealTime] Auto-classified ${data.classified} email(s)`);
+                }
+            })
+            .catch(err => console.error('[RealTime] Auto-classification error:', err));
+    }
+
+    // Pick up a Shypple batch that's already running server-side from an earlier page
+    // load/session - without this, the Operations Process tab shows a stale "No batch
+    // running yet" panel even though a batch is genuinely paused there waiting for
+    // confirmation, until the user tries to start a new one and gets a 409.
+    fetch("/api/operations/status")
+        .then(res => res.json())
+        .then(data => { if (data.success && data.state && data.state.running) startOperationsPolling(); })
+        .catch(() => { });
+
+    function _renderScraperStatusBanner(data) {
+        const el = document.getElementById("scraper-status-banner");
+        if (!el) return;
+        if (!data || !data.success) {
+            el.style.display = "block";
+            el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml((data && data.error) || "Could not reach the Gmail automation.")}`;
+            return;
+        }
+        if (data.stale) {
+            const mins = Math.floor((data.age_seconds || 0) / 60);
+            const ageLabel = mins > 0 ? `${mins}m ${Math.floor((data.age_seconds || 0) % 60)}s` : `${data.age_seconds || 0}s`;
+            el.style.display = "block";
+            el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> This list hasn't updated in ${ageLabel} - the "Open Gmail" automation may have stopped. Showing the last known a-cmr label mail.`;
+            return;
+        }
+        el.style.display = "none";
+        el.innerHTML = "";
+    }
+
+    // The label box no longer changes what's fetched - this pipeline's only source is
+    // the a-cmr scrape (see /api/emails) - the param is kept only so the input still
+    // round-trips through the URL for the user's own reference.
+    function fetchEmailsLive(isManual = false) {
+        const labelInput = document.getElementById('label-input');
+        const label = labelInput ? labelInput.value.trim() : "";
+        const url = `/api/emails?label=${encodeURIComponent(label)}`;
+
+        if (isManual) {
+            showToast("Fetching live emails...", false);
+        }
+
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                _renderScraperStatusBanner(data);
+                if (data.success && data.emails) {
+                    updateEmailListDOM(data.emails);
+                    if (isManual) {
+                        showToast(`Successfully updated live emails (${data.emails.length} messages found).`, false);
+                    }
+                } else if (isManual && data.error) {
+                    showToast(`Live update error: ${data.error}`, true);
+                }
+            })
+            .catch(err => {
+                console.error("Live email fetch failed:", err);
+                _renderScraperStatusBanner({ success: false, error: String(err) });
+                if (isManual) {
+                    showToast("Failed to fetch live emails: " + err, true);
+                }
+            });
+    }
+
+    function updateEmailListDOM(emails) {
+        const container = document.querySelector('.mail-items-container');
+        const badge = document.querySelector('.mail-count-badge');
+        if (!container) return;
+
+        // Update badge count
+        if (badge) {
+            badge.innerText = `${emails.length} messages`;
+        }
+
+        if (emails.length === 0) {
+            container.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 60px 16px;">No messages found.</div>`;
+            return;
+        }
+
+        // Find currently selected email ID to preserve selection
+        const selectedItem = document.querySelector('.gmail-row.selected');
+        const selectedId = selectedItem ? selectedItem.id.replace('mail-', '') : null;
+
+        // Build new HTML for email items
+        let html = '';
+        emails.forEach(email => {
+            const dateStr = email.date.includes(',') ? email.date.split(',')[1] : email.date;
+
+            // Escape values for HTML attributes
+            const escapedFrom = email.from.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const escapedSubject = email.subject.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const escapedDate = email.date.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            const escapedSnippet = (email.snippet || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+            const isSelected = (selectedId === email.id) ? 'selected' : '';
+            const unread = !!email.unread;
+            const starred = !!email.starred;
+            const starColor = email.starColor || '';
+            const readWriteClass = unread ? 'unread' : 'read';
+            const starColorClass = starColor ? `star-color-${starColor}` : '';
+            const starClasses = `${starred ? 'fa-solid' : 'fa-regular'} fa-star gmail-star ${starred ? 'starred' : ''} ${starColorClass}`;
+            const starTitle = starColor ? `${starColor} star` : '';
+            const attachmentIcon = email.hasAttachment ? '<i class="fa-solid fa-paperclip gmail-attachment-icon"></i>' : '';
+            const envelopeIcon = unread ? 'fa-envelope-open' : 'fa-envelope';
+
+            html += `
+                <div class="gmail-row ${readWriteClass} ${isSelected}" id="mail-${email.id}"
+                     data-id="${email.id}"
+                     data-from="${escapedFrom}"
+                     data-subject="${escapedSubject}"
+                     data-date="${escapedDate}"
+                     data-snippet="${escapedSnippet}"
+                     data-unread="${unread}"
+                     data-starred="${starred}"
+                     data-star-color="${starColor}"
+                     onclick="selectMail(this)">
+                    <div class="gmail-col-select" onclick="event.stopPropagation();">
+                        <input type="checkbox" class="mail-select-checkbox" ${window.selectedMailIds && window.selectedMailIds.has(email.id) ? 'checked' : ''} onchange="toggleMailSelection(this.closest('.gmail-row'), this.checked)">
+                        <i class="${starClasses}" title="${starTitle}" onclick="toggleStarAction(event, this.closest('.gmail-row'))"></i>
+                    </div>
+                    <div class="gmail-col-sender">${email.from}</div>
+                    <div class="gmail-col-content">
+                        ${attachmentIcon}
+                        <span class="gmail-subject">${email.subject}</span>
+                        <span class="gmail-separator">—</span>
+                        <span class="gmail-snippet">${email.snippet || ''}</span>
+                    </div>
+                    <div class="gmail-col-date">${dateStr}</div>
+                    <div class="gmail-row-actions" onclick="event.stopPropagation();">
+                        <button class="gmail-row-action-btn" title="Archive" onclick="archiveRowAction(this.closest('.gmail-row'))"><i class="fa-solid fa-box-archive"></i></button>
+                        <button class="gmail-row-action-btn danger" title="Delete" onclick="deleteRowAction(this.closest('.gmail-row'))"><i class="fa-solid fa-trash"></i></button>
+                        <button class="gmail-row-action-btn" title="Mark as read/unread" onclick="toggleReadRowAction(this.closest('.gmail-row'))"><i class="fa-solid ${envelopeIcon}"></i></button>
+                    </div>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
+        annotateRowDocTypes();
+        autoClassifyNewMails();
+
+        // Rows just got rebuilt from scratch - drop selections for mails that no
+        // longer exist in this fetch (archived/deleted elsewhere) and refresh the
+        // header "select all" + Process button state to match.
+        const liveIds = new Set(emails.map(e => e.id));
+        for (const id of Array.from(window.selectedMailIds || [])) {
+            if (!liveIds.has(id)) window.selectedMailIds.delete(id);
+        }
+        updateProcessButtonState();
+    }
+
+    // Live auto-classify: after each background refresh, find document types for any
+    // mails that don't have one yet (newly arrived). Read-safe - the server uses
+    // metadata only and skips already-classified mails, so this is cheap to run every
+    // refresh. A busy flag prevents overlapping passes from stacking up.
+    window.__autoClassifyBusy = false;
+    function autoClassifyNewMails() {
+        if (window.__autoClassifyBusy) return;
+
+        // Any visible row whose type we don't already know locally?
+        const rows = document.querySelectorAll('.gmail-row');
+        if (!rows.length) return;
+        let hasUnknown = false;
+        rows.forEach(r => { if (r.dataset.id && !window.docTypes[r.dataset.id]) hasUnknown = true; });
+        if (!hasUnknown) return;
+
+        // CMR and LCL each have their own dedicated live auto-classify endpoint
+        // (classify_new_documents_cmr / classify_new_documents_lcl in tracking_api.py) -
+        // same separation as classifyAllDocuments' CMR/LCL endpoint split.
+        const labelBox = document.getElementById("label-input");
+        const currentLabel = (labelBox ? labelBox.value.trim() : "") || "a-cmr";
+        const endpoint = currentLabel === "lcl-arrivals---release"
+            ? "/api/emails/classify_new_lcl"
+            : "/api/emails/classify_new";
+
+        window.__autoClassifyBusy = true;
+        fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({})
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data && data.success && data.types) {
+                    Object.assign(window.docTypes, data.types);
+                    Object.assign(window.docTypesAll, data.types_all || {});
+                    Object.assign(window.docContainers, data.containers || {});
+                    Object.assign(window.docTypeCounts, data.type_counts || {});
+                    annotateRowDocTypes();
+                    if (data.new_count) {
+                        console.log(`[DocType] auto-classified ${data.new_count} new mail(s)`);
+                    }
+                }
+            })
+            .catch(err => console.error("Auto-classify failed:", err))
+            .finally(() => { window.__autoClassifyBusy = false; });
+    }
+
+    function openComposeModal() {
+        document.getElementById("modal-title").innerText = "New Message";
+        document.getElementById("modal-to").value = "";
+        document.getElementById("modal-subject").value = "";
+        document.getElementById("modal-body").value = "";
+        document.getElementById("email-modal").style.display = "flex";
+    }
+
+    function openReplyModal() {
+        const selectedRow = document.querySelector('.gmail-row.selected');
+        if (!selectedRow) return;
+
+        const fromSender = selectedRow.dataset.from;
+        let toEmail = fromSender;
+        const bracketIndex = fromSender.indexOf("<");
+        if (bracketIndex !== -1) {
+            toEmail = fromSender.substring(bracketIndex + 1, fromSender.indexOf(">"));
+        }
+
+        const subject = "Re: " + selectedRow.dataset.subject;
+
+        document.getElementById("modal-title").innerText = "Reply to Email";
+        document.getElementById("modal-to").value = toEmail;
+        document.getElementById("modal-subject").value = subject;
+        document.getElementById("modal-body").value = "\n\n--- On " + selectedRow.dataset.date + ", " + fromSender + " wrote: ---\n> " + selectedRow.dataset.snippet;
+        document.getElementById("email-modal").style.display = "flex";
+    }
+
+    function closeEmailModal() {
+        document.getElementById("email-modal").style.display = "none";
+    }
+
+    function sendEmailAction() {
+        const to = document.getElementById("modal-to").value.trim();
+        const subject = document.getElementById("modal-subject").value.trim();
+        const body = document.getElementById("modal-body").value.trim();
+
+        if (!to || !subject || !body) {
+            showToast("All fields are required.", true);
+            return;
+        }
+
+        closeEmailModal();
+
+        fetch('/api/emails/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to, subject, body })
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    showToast('Email sent successfully!', false);
+                    fetchEmailsLive();
+                } else {
+                    showToast('Failed to send email: ' + (data.error || data.message), true);
+                }
+            })
+            .catch(err => {
+                showToast('Error sending email: ' + err, true);
+            });
+    }
+
+    function markAsUnreadAction() {
+        const selectedRow = document.querySelector('.gmail-row.selected');
+        if (!selectedRow) return;
+
+        postEmailAction(selectedRow, 'mark_unread').then(data => {
+            if (data.success) {
+                selectedRow.dataset.unread = 'true';
+                selectedRow.classList.add('unread');
+                selectedRow.classList.remove('read');
+                backToList();
+            } else {
+                showToast('Failed to mark unread: ' + (data.error || data.message || 'Unknown error'), true);
+            }
+        }).catch(err => {
+            showToast('Error marking unread: ' + err, true);
+        });
+    }
+</script>
+{% endblock %}
