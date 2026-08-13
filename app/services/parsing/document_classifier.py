@@ -1779,6 +1779,38 @@ _DEVANNING_DATE_LABEL_RE = re.compile(
 )
 
 
+_INVALID_CUSTOMS_WORDS_RE = re.compile(
+    r"\b(?:"
+    r"vessel|voyage|vsl|vyg|voy|ship|feeder|flag|imo|mmsi"
+    r"|n/?a|tbd|none|nil|null|unknown|pending|unavailable|not\s+available|available\s+after|after\s+devanning|available"
+    r"|eta|etd|ata|atd|pod|pol|port|discharge|cfs|warehouse|address"
+    r"|bill\s+of\s+lading|b/?l|container|seal|weight|volume|packages|pcs|gross|net"
+    r"|maersk|msc|cma|cgm|cosco|evergreen|hapag|lloyd|oocl|yang\s*ming|wan\s*hai|hyundai|hmm|zim|pil|kmc|sitc|whl|dfds|unifeeder"
+    r"|isabella|marco|polo|given|ever|apus|express|spirit|bridge|haven|harbor|bay|star|ocean|sea|pacific|atlantic"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_customs_number(candidate):
+    """Sanity-check a preceding customs number candidate. Returns False if candidate
+    is blank, contains no digits, is a date, or contains vessel/voyage/status words
+    that flattened PDF table extraction frequently grabs from adjacent cells when
+    the customs number field is genuinely blank."""
+    if not candidate:
+        return False
+    candidate = candidate.strip()
+    if not re.search(r"\d", candidate):
+        return False
+    if _INVALID_CUSTOMS_WORDS_RE.search(candidate):
+        return False
+    if re.match(r"^\d{4}[-/.]\d{2}[-/.]\d{2}$", candidate) or re.match(r"^\d{2}[-/.]\d{2}[-/.]\d{4}$", candidate):
+        return False
+    if len(candidate) < 4 or len(candidate) > 35:
+        return False
+    return True
+
+
 def extract_lcl_arrival_data(text):
     """Extract data fields required for LCL Arrivals:
     - container_number (ISO 6346)
@@ -1800,24 +1832,23 @@ def extract_lcl_arrival_data(text):
     devanning_date = _normalize_date_str(label_match.group(1)) if label_match else None
 
     # Customs number match (e.g. 641761FPS-01 or Customs Number label).
-    customs_match = re.search(r"(?:customs\s*number|previous\s*customs?\s*number)[:\s]*([A-Z0-9\-_]+)", text, re.IGNORECASE)
+    customs_match = re.search(
+        r"(?:customs\s*number|previous\s*customs?\s*number|preceding\s*customs?\s*number|customs\s*no\.?|customs\s*ref(?:erence)?)[:\s]*([A-Z0-9\-_/]{3,35})",
+        text, re.IGNORECASE
+    )
     customs_number = None
     if customs_match:
         candidate = customs_match.group(1).strip()
-        # PDF text extraction of a 2-column table can flatten an unrelated
-        # neighbouring cell's word right after the "Customs number" label when a
-        # specific document has genuinely left it blank (real example: an Arrival
-        # Notice whose customs number is "available after devanning" - i.e. not yet
-        # known - still matched "ETA" from a nearby cell as if it were the value). A
-        # real customs/reference number always contains a digit (see this function's
-        # own example, 641761FPS-01) - a purely-alphabetic candidate is almost
-        # certainly a neighbouring label/word, not an actual value, so it's discarded
-        # here rather than trusted.
-        if re.search(r"\d", candidate):
+        if _is_valid_customs_number(candidate):
             customs_number = candidate
+
     if not customs_number:
-        customs_match = re.search(r"\b\d{6}[A-Z]{3}-\d{2}\b", text)
-        customs_number = customs_match.group(0) if customs_match else None
+        # Check standard preceding customs number formats (e.g. 641761FPS-01)
+        for match in re.finditer(r"\b(\d{5,}[A-Z0-9\-_]{2,})\b", text):
+            cand = match.group(1).strip()
+            if _is_valid_customs_number(cand):
+                customs_number = cand
+                break
 
     # CFS Address / Warehouse - only the FIRST LINE of the address (e.g. "VLS
     # BELGIUM"), per the operator's explicit request: the Shypple side only ever needs
@@ -1864,7 +1895,7 @@ def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename):
         "- devanning_date: the specific devanning date, available date at CFS, or delayed devanning date "
         "(respond as YYYY-MM-DD). IMPORTANT: Do NOT use the vessel ETA (Estimated Time of Arrival) or document issue date as the devanning date. If there is no specific devanning, available, or delay date present, return null.\n"
         "- customs_number: the value under a label like \"Customs Number\" or "
-        "\"Preceding/Previous Customs Number\"\n"
+        "\"Preceding/Previous Customs Number\" (e.g. 641761FPS-01). IMPORTANT: Do NOT return a vessel name, voyage number, ETA, \"N/A\", \"TBD\", \"available after devanning\", or any adjacent label if the customs number field is blank or missing. Return null if not present.\n"
         "- cfs_address: ONLY the short warehouse/city name on the FIRST line under a "
         "label like \"CFS Address\", \"Warehouse\", or \"Discharge CFS\" (e.g. \"VLS "
         "BELGIUM\") - do NOT include the street address, opening hours, contact "
@@ -1890,7 +1921,9 @@ def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename):
         if devanning:
             result["devanning_date"] = devanning
         if parsed.get("customs_number"):
-            result["customs_number"] = str(parsed["customs_number"]).strip()
+            c_val = str(parsed["customs_number"]).strip()
+            if _is_valid_customs_number(c_val):
+                result["customs_number"] = c_val
         raw_cfs = str(parsed.get("cfs_address") or "").strip()
         if raw_cfs:
             # Sanity-check, not blind trust: despite the prompt's explicit instruction
