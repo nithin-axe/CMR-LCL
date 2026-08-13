@@ -1862,11 +1862,11 @@ def handle_delay_or_devanning(page, job):
         job["extracted_devanning_date"] = extracted_date or ""
 
     if not extracted_date:
-        log_job(job, "Could not extract a devanning/delay date from this email - marking unread + "
-                     "yellow star anyway so it isn't lost, but this needs a manual look.")
+        log_job(job, "There is no date in the mail and the document for delay/devanning - marking unread + "
+                     "yellow star anyway so it can be reviewed manually.")
         _star_source_email(job, "yellow")
         _mark_source_email_unread(job)
-        set_job_status(job, "lcl_no_date_found", reason="No date could be extracted from this email.")
+        set_job_status(job, "lcl_no_date_found", reason="There is no date in the mail and the document for delay and devanning.")
         return
 
     if (current.get("devanning_date") or "") == extracted_date:

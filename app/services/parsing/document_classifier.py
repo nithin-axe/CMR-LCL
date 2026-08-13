@@ -1717,25 +1717,43 @@ def extract_sf_number(text):
 
 
 def _normalize_date_str(raw):
-    """Turn a raw date substring (YYYY-MM-DD, DD-MM-YYYY / DD/MM/YYYY, or DD/MM) into
+    """Turn a raw date substring (YYYY-MM-DD, DD-MM-YYYY / DD/MM/YYYY / DD.MM.YYYY, DD Mon YYYY, or DD/MM) into
     YYYY-MM-DD. Returns None if raw doesn't look like these shapes."""
     if not raw:
         return None
     raw = raw.strip()
     
-    # Check YYYY-MM-DD
-    m = re.match(r"^(\d{4})[-/](\d{2})[-/](\d{2})$", raw)
+    # Check YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", raw)
     if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
         
-    # Check DD-MM-YYYY
-    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", raw)
+    # Check DD-MM-YYYY or DD/MM/YYYY or DD.MM.YYYY
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$", raw)
     if m:
         day, month, year = m.groups()
         return f"{year}-{int(month):02d}-{int(day):02d}"
+
+    # Check DD-MM-YY or DD/MM/YY or DD.MM.YY
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$", raw)
+    if m:
+        day, month, yy = m.groups()
+        year = 2000 + int(yy)
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+
+    # Check DD Mon YYYY (e.g. 15 Aug 2026 or 15-Aug-2026)
+    m = re.match(r"^(\d{1,2})[\s\-/.]?([A-Za-z]{3,9})[\s\-/.]?(\d{4})$", raw)
+    if m:
+        day, mon_str, year = m.groups()
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(f"{day} {mon_str[:3]} {year}", "%d %b %Y")
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
         
     # Check DD-MM or D-MM (partial date, e.g. 4/08)
-    m = re.match(r"^(\d{1,2})[-/](\d{1,2})$", raw)
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})$", raw)
     if m:
         day, month = m.groups()
         from datetime import datetime
@@ -1745,13 +1763,18 @@ def _normalize_date_str(raw):
     return None
 
 
-# Labels the "Expected devanning date"/"Available date at cfs" value can be printed
-# under on an Arrival notice / Delay-or-Devanning document - tried BEFORE a bare
-# date scan so an unrelated date elsewhere on the page (issue date, ETA, etc.)
-# doesn't win just because it appears earlier in the text.
+# Labels under which expected devanning date, available date at CFS, delay date, or
+# unpacked/stripping date can be printed in email text or attached documents.
+# Strictly requires an explicit label so unrelated dates (such as vessel ETA, ATA,
+# or document issue date) are NOT mistakenly grabbed when no devanning date exists.
 _DEVANNING_DATE_LABEL_RE = re.compile(
-    r"(?:expected\s+devanning\s+date|available\s+date\s+at\s+cfs|devanning\s+date)"
-    r"[^\r\n]{0,50}?\b([0-9]{1,4}[-/][0-9]{1,2}(?:[-/][0-9]{2,4})?)\b",
+    r"(?:"
+    r"expected\s+devanning\s+date|devan(?:ning|ing|aing|ing)?\s+date|devan(?:ning|ing|aing|ing)?"
+    r"|available\s+date\s+(?:at\s+cfs)?|cfs\s+available\s+date|cfs\s+avail(?:able|\.)?\s+date|availability\s+date|available\s+at\s+cfs|available\s+from|available\s+after|avail\.?\s+date|date\s+of\s+availability"
+    r"|delaye?d?\s+(?:date|to|until)|new\s+devan(?:ning|ing|aing|ing)?\s+date|revised\s+(?:devan(?:ning|ing|aing|ing)?\s+)?date|new\s+available\s+date|revised\s+availab(?:ility|le)\s+date|postponed\s+(?:to|until)"
+    r"|unpacked?\s+date|stripping\s+date|storage\s+start(?:ing)?|free\s+time\s+until|pickup\s+date|cfs\s+date"
+    r")"
+    r"[\s\:\=]*[^\r\n]{0,50}?\b([0-9]{1,4}[-/.\s][0-9A-Za-z]{1,9}(?:[-/.\s][0-9]{2,4})?)\b",
     re.IGNORECASE,
 )
 
@@ -1769,23 +1792,12 @@ def extract_lcl_arrival_data(text):
     containers = find_container_numbers(text)
     container_number = containers[0] if containers else None
 
-    # Date extraction: prefer an explicitly labeled "Expected devanning date" /
-    # "Available date at cfs" value over the first date-shaped substring anywhere
-    # in the text (which could just as easily be an ETA or the document's issue
-    # date). Falls back to the bare scan when no such label is present.
+    # Date extraction: ONLY extract a date if it is explicitly labeled as a
+    # devanning, available, or delay date via _DEVANNING_DATE_LABEL_RE.
+    # We deliberately do NOT fall back to bare/unlabeled date scans in the document
+    # because that would mistakenly grab unrelated dates like vessel ETA or issue date.
     label_match = _DEVANNING_DATE_LABEL_RE.search(text)
     devanning_date = _normalize_date_str(label_match.group(1)) if label_match else None
-    if not devanning_date:
-        date_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
-        if not date_match:
-            d_match = re.search(r"\b(\d{2})[-/](\d{2})[-/](\d{4})\b", text)
-            if d_match:
-                day, month, year = d_match.groups()
-                devanning_date = f"{year}-{month}-{day}"
-            else:
-                devanning_date = None
-        else:
-            devanning_date = date_match.group(1)
 
     # Customs number match (e.g. 641761FPS-01 or Customs Number label).
     customs_match = re.search(r"(?:customs\s*number|previous\s*customs?\s*number)[:\s]*([A-Z0-9\-_]+)", text, re.IGNORECASE)
@@ -1844,13 +1856,13 @@ def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename):
     if not data_bytes or not (mime or "").startswith(_LLM_READABLE_PREFIXES) or len(data_bytes) > 18 * 1024 * 1024:
         return {}
     prompt = (
-        "This is an LCL (less-than-container-load) Arrival Notice or Delivery Order "
+        "This is an LCL (less-than-container-load) Arrival Notice or Delay / Devanning "
         "document. Read it carefully - including any handwritten or stamped text - and "
         "extract the following fields, using null for anything genuinely not present:\n"
         "- sf_number: a reference starting with \"SF\" followed by digits (e.g. SF169508)\n"
         "- container_number: an ISO-6346 container number (4 letters + 7 digits, e.g. TEMU9681744)\n"
-        "- devanning_date: the value under a label like \"Expected devanning date\" or "
-        "\"Available date at cfs\" (respond as YYYY-MM-DD)\n"
+        "- devanning_date: the specific devanning date, available date at CFS, or delayed devanning date "
+        "(respond as YYYY-MM-DD). IMPORTANT: Do NOT use the vessel ETA (Estimated Time of Arrival) or document issue date as the devanning date. If there is no specific devanning, available, or delay date present, return null.\n"
         "- customs_number: the value under a label like \"Customs Number\" or "
         "\"Preceding/Previous Customs Number\"\n"
         "- cfs_address: ONLY the short warehouse/city name on the FIRST line under a "

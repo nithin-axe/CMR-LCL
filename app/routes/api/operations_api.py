@@ -520,11 +520,13 @@ def lcl_arrivals_process():
                     ]
                     for doc in att_docs:
                         try:
-                            att_bytes, _mime, _fn = fetch_document_bytes(
+                            att_bytes, att_mime, att_fn = fetch_document_bytes(
                                 mid, doc.get("type"), subject=subject,
                                 attachment_index=doc.get("attachment_index"), label=_LCL_LABEL_KEY,
                             )
                             if att_bytes:
+                                if not data_bytes:
+                                    data_bytes, doc_mime, doc_filename = att_bytes, att_mime, att_fn
                                 page_texts = _extract_pdf_page_texts(att_bytes)
                                 if page_texts:
                                     text_for_extraction = "\n".join(page_texts) + "\n" + text_for_extraction
