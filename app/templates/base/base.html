@@ -30,13 +30,17 @@
             </div>
 
             <nav class="sidebar-nav">
-                <a href="/cmr-process" class="nav-item {% if selected_label == 'a-cmr' or not selected_label %}active{% endif %}" id="nav-cmr">
+                <a href="/cmr-process" class="nav-item {% if active_page == 'cmr' or (not active_page and (selected_label == 'a-cmr' or not selected_label)) %}active{% endif %}" id="nav-cmr">
                     <i class="fa-solid fa-file-contract"></i>
                     <span>CMR Process</span>
                 </a>
-                <a href="/lcl-arrivals" class="nav-item {% if selected_label == 'lcl-arrivals---release' %}active{% endif %}" id="nav-lcl-arrivals">
+                <a href="/lcl-arrivals" class="nav-item {% if active_page == 'lcl' or (not active_page and selected_label == 'lcl-arrivals---release') %}active{% endif %}" id="nav-lcl-arrivals">
                     <i class="fa-solid fa-boxes-packing"></i>
                     <span>LCL Arrivals / Release</span>
+                </a>
+                <a href="/lcl-my-jewellery" class="nav-item {% if active_page == 'my_jewellery' %}active{% endif %}" id="nav-lcl-my-jewellery">
+                    <i class="fa-solid fa-gem"></i>
+                    <span>My Jewellery Mails</span>
                 </a>
             </nav>
 

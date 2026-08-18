@@ -1142,13 +1142,28 @@
 {% endif %}
 
 <!-- Tabs Navigation -->
-<div class="tab-navigation">
-    <button class="tab-btn active" onclick="switchTab(event, 'inbox-tab')">
-        <i class="fa-solid fa-inbox" style="margin-right: 6px;"></i> Gmail Inbox
-    </button>
-    <button class="tab-btn" onclick="switchTab(event, 'process-tab')">
-        <i class="fa-solid fa-gear" style="margin-right: 6px;"></i> Operations Process
-    </button>
+<div class="tab-navigation" style="display: flex; align-items: center; justify-content: space-between;">
+    <div style="display: flex; gap: 8px;">
+        <button class="tab-btn {% if selected_label != 'lcl-arrivals---release' %}active{% endif %}" id="tab-btn-cmr" onclick="switchProcessMode('cmr')">
+            <i class="fa-solid fa-file-contract" style="margin-right: 6px;"></i> CMR Process Hub
+        </button>
+        <button class="tab-btn {% if selected_label == 'lcl-arrivals---release' %}active{% endif %}" id="tab-btn-lcl" onclick="switchProcessMode('lcl')">
+            <i class="fa-solid fa-boxes-packing" style="margin-right: 6px;"></i> LCL Arrivals Hub
+        </button>
+        <button class="tab-btn" id="tab-btn-cmr-ops" onclick="switchTab(event, 'cmr-process-tab')">
+            <i class="fa-solid fa-file-signature" style="margin-right: 6px;"></i> CMR Operations Process
+        </button>
+        <button class="tab-btn" id="tab-btn-lcl-ops" onclick="switchTab(event, 'lcl-process-tab')">
+            <i class="fa-solid fa-truck-ramp-box" style="margin-right: 6px;"></i> LCL Operations Process
+        </button>
+    </div>
+    <div style="font-size: 0.82rem; font-weight: 600; padding: 6px 14px; border-radius: 20px; background: rgba(99, 102, 241, 0.12); color: var(--accent-indigo); border: 1px solid rgba(99, 102, 241, 0.25);" id="active-process-indicator">
+        {% if selected_label == 'lcl-arrivals---release' %}
+            <i class="fa-solid fa-boxes-packing"></i> Active Mode: LCL Arrivals / Release
+        {% else %}
+            <i class="fa-solid fa-file-contract"></i> Active Mode: CMR Process
+        {% endif %}
+    </div>
 </div>
 
 <!-- Tab 1: Gmail Inbox Content -->
@@ -1460,19 +1475,17 @@
     </div>
 </div>
 
-<!-- Tab 2: Operations Process Content -->
-<div id="process-tab" class="tab-content">
+<!-- Tab 2A: CMR Operations Process Content -->
+<div id="cmr-process-tab" class="tab-content">
     <div class="glass-card"
         style="margin-bottom: 24px; padding: 20px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; flex-shrink: 0;">
         <div>
-            <h3 style="margin-bottom: 4px;"><i class="fa-solid fa-gear" style="margin-right: 6px;"></i> Shypple
-                verification</h3>
+            <h3 style="margin-bottom: 4px;"><i class="fa-solid fa-file-signature" style="margin-right: 6px;"></i> CMR Operations Process Verification</h3>
             <p style="color: var(--text-secondary); font-size: 0.9rem;">
-                Select email(s) in the Gmail Inbox tab and click Process to verify their container(s) and document
-                type(s) against Shypple.
+                Select email(s) in the <strong>CMR Process Hub</strong> and click Process to verify CMR container(s) and document type(s) against Shypple.
             </p>
         </div>
-        <button class="btn btn-secondary" id="launch-operations-btn" onclick="launchOperationsBrowser()"
+        <button class="btn btn-secondary" id="launch-operations-btn-cmr" onclick="launchOperationsBrowser(this)"
             style="width: auto; padding: 10px 20px;">
             <i class="fa-solid fa-play"></i> Launch Shypple browser
         </button>
@@ -1487,11 +1500,43 @@
     </div>
 
     <div id="process-empty-state" class="process-card" style="flex-shrink: 0;">
-        <i class="fa-solid fa-sliders" style="font-size: 3.5rem; color: var(--accent-indigo); margin-bottom: 24px;"></i>
-        <h2>No batch running yet</h2>
-        <p
-            style="color: var(--text-secondary); margin-top: 12px; max-width: 500px; margin-left: auto; margin-right: auto;">
-            Go to the Gmail Inbox tab, check one or more emails, then click Process.
+        <i class="fa-solid fa-file-signature" style="font-size: 3.5rem; color: var(--accent-indigo); margin-bottom: 24px;"></i>
+        <h2>No CMR batch running yet</h2>
+        <p style="color: var(--text-secondary); margin-top: 12px; max-width: 500px; margin-left: auto; margin-right: auto;">
+            Go to the CMR Process Hub tab, check one or more emails, then click Process.
+        </p>
+    </div>
+</div>
+
+<!-- Tab 2B: LCL Operations Process Content -->
+<div id="lcl-process-tab" class="tab-content">
+    <div class="glass-card"
+        style="margin-bottom: 24px; padding: 20px; display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; flex-shrink: 0;">
+        <div>
+            <h3 style="margin-bottom: 4px;"><i class="fa-solid fa-truck-ramp-box" style="margin-right: 6px;"></i> LCL Arrivals Operations Process Verification</h3>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">
+                Select email(s) in the <strong>LCL Arrivals Hub</strong> and click Process to verify LCL Arrival notices, devanning dates, and CFS details against Shypple.
+            </p>
+        </div>
+        <button class="btn btn-secondary" id="launch-operations-btn-lcl" onclick="launchOperationsBrowser(this)"
+            style="width: auto; padding: 10px 20px;">
+            <i class="fa-solid fa-play"></i> Launch Shypple browser
+        </button>
+    </div>
+
+    <div id="operations-blocked-banner-lcl" style="flex-shrink: 0;"></div>
+    <div id="operations-banner-lcl" style="flex-shrink: 0;"></div>
+
+    <div id="process-panel-lcl" class="glass-card" style="padding: 24px; display: none; flex-shrink: 0;">
+        <div class="process-summary"></div>
+        <div class="process-job-list"></div>
+    </div>
+
+    <div id="process-empty-state-lcl" class="process-card" style="flex-shrink: 0;">
+        <i class="fa-solid fa-truck-ramp-box" style="font-size: 3.5rem; color: var(--accent-indigo); margin-bottom: 24px;"></i>
+        <h2>No LCL Arrivals batch running yet</h2>
+        <p style="color: var(--text-secondary); margin-top: 12px; max-width: 500px; margin-left: auto; margin-right: auto;">
+            Go to the LCL Arrivals Hub tab, check one or more emails, then click Process.
         </p>
     </div>
 </div>
@@ -1525,6 +1570,25 @@
 {% block extra_js %}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 <script>
+    // ----- CMR / LCL operations-process panel targeting -----
+    // The Operations Process view was split into two separate tabs/panels
+    // (cmr-process-tab / lcl-process-tab, each with its own process-panel*/
+    // operations-banner*/process-empty-state*/operations-blocked-banner* ids) but the
+    // render/poll functions below were still hardcoded to the original CMR-only ids -
+    // so an LCL batch's results (including the read/star confirmation lines) were
+    // rendered into the hidden CMR panel while the visible LCL tab kept showing its
+    // static empty state. window.__activeProcessFlow records which flow the CURRENTLY
+    // showing/running batch belongs to (set when a review/batch actually starts, not
+    // on every tab click) so a later tab switch can't relocate an in-progress batch's
+    // panel out from under it; it's seeded from the server-rendered selected_label so
+    // a page reload that resumes an already-running batch (see the /operations/status
+    // check near the bottom of this script) still targets the right panel.
+    window.__activeProcessFlow = "{{ 'lcl' if selected_label == 'lcl-arrivals---release' else 'cmr' }}";
+    function _opPanelId() { return window.__activeProcessFlow === "lcl" ? "process-panel-lcl" : "process-panel"; }
+    function _opEmptyStateId() { return window.__activeProcessFlow === "lcl" ? "process-empty-state-lcl" : "process-empty-state"; }
+    function _opBannerId() { return window.__activeProcessFlow === "lcl" ? "operations-banner-lcl" : "operations-banner"; }
+    function _opBlockedBannerId() { return window.__activeProcessFlow === "lcl" ? "operations-blocked-banner-lcl" : "operations-blocked-banner"; }
+
     // ----- Toast notifications + custom confirm (see the HTML comment above these
     // elements for why: native alert()/confirm() are silently unusable here). -----
     function showToast(message, isError) {
@@ -1560,6 +1624,39 @@
         const cb = window.__confirmModalCallback;
         window.__confirmModalCallback = null;
         if (cb) cb(result);
+    }
+
+    // Process mode switcher: switch between CMR and LCL process views
+    function switchProcessMode(mode) {
+        const labelInput = document.getElementById("label-input");
+        const indicator = document.getElementById("active-process-indicator");
+        const cmrBtn = document.getElementById("tab-btn-cmr");
+        const lclBtn = document.getElementById("tab-btn-lcl");
+        const cmrOpsBtn = document.getElementById("tab-btn-cmr-ops");
+        const lclOpsBtn = document.getElementById("tab-btn-lcl-ops");
+
+        if (mode === "lcl") {
+            if (labelInput) labelInput.value = "lcl-arrivals---release";
+            if (indicator) indicator.innerHTML = '<i class="fa-solid fa-boxes-packing"></i> Active Mode: LCL Arrivals / Release';
+            if (cmrBtn) cmrBtn.classList.remove("active");
+            if (lclBtn) lclBtn.classList.add("active");
+            if (cmrOpsBtn) cmrOpsBtn.classList.remove("active");
+            if (lclOpsBtn) lclOpsBtn.classList.remove("active");
+        } else {
+            if (labelInput) labelInput.value = "a-cmr";
+            if (indicator) indicator.innerHTML = '<i class="fa-solid fa-file-contract"></i> Active Mode: CMR Process';
+            if (lclBtn) lclBtn.classList.remove("active");
+            if (cmrBtn) cmrBtn.classList.add("active");
+            if (cmrOpsBtn) cmrOpsBtn.classList.remove("active");
+            if (lclOpsBtn) lclOpsBtn.classList.remove("active");
+        }
+
+        // Switch to inbox view tab content if not active
+        activateTab("inbox-tab");
+        // Clear previous selections and fetch emails for the newly active mode
+        window.selectedMailIds = new Set();
+        if (typeof updateProcessButtonState === "function") updateProcessButtonState();
+        fetchEmailsLive(true);
     }
 
     // Tab switching logic
@@ -1660,10 +1757,11 @@
 
         window.__activeBatchMessageIds = new Set(ids);
         window.__longActionInFlight = true;
+        window.__activeProcessFlow = "cmr";
         const btn = document.getElementById("process-selected-btn");
         if (btn) btn.disabled = true;
 
-        activateTab("process-tab");
+        activateTab("cmr-process-tab");
         renderOperationsLoading(ids.length);
 
         fetch("/api/operations/extract", {
@@ -1685,9 +1783,9 @@
     }
 
     function renderOperationsLoading(count) {
-        const panel = document.getElementById("process-panel");
-        const banner = document.getElementById("operations-banner");
-        const emptyState = document.getElementById("process-empty-state");
+        const panel = document.getElementById(_opPanelId());
+        const banner = document.getElementById(_opBannerId());
+        const emptyState = document.getElementById(_opEmptyStateId());
         if (emptyState) emptyState.style.display = "none";
         if (banner) banner.innerHTML = "";
         if (panel) {
@@ -1763,9 +1861,9 @@
 
     function renderOperationsReview(jobs, errors) {
         window.__pendingOperationsJobs = jobs;
-        const panel = document.getElementById("process-panel");
-        const banner = document.getElementById("operations-banner");
-        const emptyState = document.getElementById("process-empty-state");
+        const panel = document.getElementById(_opPanelId());
+        const banner = document.getElementById(_opBannerId());
+        const emptyState = document.getElementById(_opEmptyStateId());
         if (emptyState) emptyState.style.display = "none";
         if (banner) banner.innerHTML = "";
         if (!panel) return;
@@ -1858,8 +1956,8 @@
     function cancelOperationsReview() {
         window.__reviewPending = false;
         window.__pendingOperationsJobs = [];
-        const panel = document.getElementById("process-panel");
-        const emptyState = document.getElementById("process-empty-state");
+        const panel = document.getElementById(_opPanelId());
+        const emptyState = document.getElementById(_opEmptyStateId());
         if (panel) { panel.style.display = "none"; panel.innerHTML = ""; }
         if (emptyState) emptyState.style.display = "block";
     }
@@ -1887,10 +1985,11 @@
         if (window.__operationsPollTimer) { clearInterval(window.__operationsPollTimer); window.__operationsPollTimer = null; }
         window.__activeBatchMessageIds = new Set(ids);
         window.__longActionInFlight = true;
+        window.__activeProcessFlow = "lcl";
         const btn = document.getElementById("process-selected-btn");
         if (btn) btn.disabled = true;
 
-        activateTab("process-tab");
+        activateTab("lcl-process-tab");
         renderOperationsLoading(ids.length);
 
         fetch("/api/operations/lcl_arrivals_process", {
@@ -1920,9 +2019,9 @@
 
     function renderLclOperationsReview(items) {
         window.__pendingLclItems = items;
-        const panel = document.getElementById("process-panel");
-        const banner = document.getElementById("operations-banner");
-        const emptyState = document.getElementById("process-empty-state");
+        const panel = document.getElementById(_opPanelId());
+        const banner = document.getElementById(_opBannerId());
+        const emptyState = document.getElementById(_opEmptyStateId());
         if (emptyState) emptyState.style.display = "none";
         if (banner) banner.innerHTML = "";
         if (!panel) return;
@@ -1951,13 +2050,18 @@
             if (item.mail_type === "arrival_notice") {
                 fields.push(["customs_number", "Customs Number"], ["cfs_address", "CFS / Warehouse"]);
             }
-            const fieldInputs = fields.map(([key, label]) => `
+            const fieldInputs = fields.map(([key, label]) => {
+                const val = ex[key] || "";
+                const notFound = !val;
+                return `
                 <span class="doctype-override-group">
-                    <span class="doctype-override-label">${label}</span>
-                    <input type="text" class="doctype-override-select" style="min-width:170px;"
-                        value="${escapeHtml(ex[key] || "")}"
+                    <span class="doctype-override-label">${label}${notFound ? ' <span style="color:#dc2626; font-weight:600;">- No data found in document</span>' : ""}</span>
+                    <input type="text" class="doctype-override-select" style="min-width:170px; ${notFound ? "border-color:#fca5a5;" : ""}"
+                        placeholder="No data found in document"
+                        value="${escapeHtml(val)}"
                         onchange="setLclFieldOverride(${itemIndex}, '${key}', this.value)" />
-                </span>`).join(" ");
+                </span>`;
+            }).join(" ");
 
             return `
                 <div class="process-job-row">
@@ -1976,6 +2080,7 @@
             subject: it.subject,
             mail_type: it.mail_type,
             sf_number: it.sf_number,
+            date: it.date,
             extracted: it.extracted || {},
             // Delivery Order mail can carry a SECOND real document that also resolves
             // to "Delivery order" on its own merit (e.g. a carrier's own "Release" PDF
@@ -2018,7 +2123,7 @@
         // process-panel/operations-banner from here on.
         window.__reviewPending = false;
         window.__longActionInFlight = true;
-        const panel = document.getElementById("process-panel");
+        const panel = document.getElementById(_opPanelId());
         if (panel) {
             panel.innerHTML = `<div class="process-summary"><i class="fa-solid fa-spinner fa-spin"></i> `
                 + `Opening the Shypple browser (if not already open) and starting verification - `
@@ -2078,7 +2183,7 @@
     ];
 
     function renderBlockedBanner(state) {
-        const el = document.getElementById("operations-blocked-banner");
+        const el = document.getElementById(_opBlockedBannerId());
         if (!el) return;
         const blocked = window.__operationsStartBlocked;
         if (blocked && state && state.running) {
@@ -2118,7 +2223,7 @@
 
     function retryBlockedOperations() {
         window.__operationsStartBlocked = null;
-        const el = document.getElementById("operations-blocked-banner");
+        const el = document.getElementById(_opBlockedBannerId());
         if (el) el.innerHTML = "";
         confirmAndStartOperations();
     }
@@ -2158,8 +2263,8 @@
             .catch(err => renderOperationsError("Error: " + err));
     }
 
-    function launchOperationsBrowser() {
-        const btn = document.getElementById("launch-operations-btn");
+    function launchOperationsBrowser(btnEl) {
+        const btn = btnEl || document.getElementById("launch-operations-btn-cmr") || document.getElementById("launch-operations-btn-lcl");
         if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Launching...'; }
         fetch("/api/operations/launch", { method: "POST" })
             .then(res => res.json())
@@ -2271,7 +2376,7 @@
         // process_lcl_arrival_job and its handlers).
         awaiting_lcl_container_confirmation: "Container & date filled - awaiting confirmation",
         awaiting_lcl_submit_confirmation: "Document form filled - awaiting confirmation to submit",
-        awaiting_lcl_delivery_confirmation: "Awaiting confirmation - verify container tab data",
+        awaiting_lcl_delivery_confirmation: "Awaiting confirmation - verify Containers/Edit tab data",
         awaiting_lcl_date_confirmation: "Awaiting confirmation to update devanning date",
         lcl_done: "Done - read + yellow starred",
         skipped_cluster_or_fcl: "Skipped - Cluster 3 or FCL",
@@ -2298,9 +2403,9 @@
     }
 
     function renderOperationsError(message) {
-        const banner = document.getElementById("operations-banner");
-        const panel = document.getElementById("process-panel");
-        const emptyState = document.getElementById("process-empty-state");
+        const banner = document.getElementById(_opBannerId());
+        const panel = document.getElementById(_opPanelId());
+        const emptyState = document.getElementById(_opEmptyStateId());
         if (banner) banner.innerHTML = `<div class="process-banner process-banner-error"><i class="fa-solid fa-triangle-exclamation"></i> <span class="process-banner-text">${escapeHtml(message)}</span></div>`;
         // No batch is actually running when this fires - drop the loading/queued panel
         // instead of leaving it sitting next to the error, which read as contradictory.
@@ -2309,9 +2414,9 @@
     }
 
     function renderOperationsPanel(state) {
-        const panel = document.getElementById("process-panel");
-        const banner = document.getElementById("operations-banner");
-        const emptyState = document.getElementById("process-empty-state");
+        const panel = document.getElementById(_opPanelId());
+        const banner = document.getElementById(_opBannerId());
+        const emptyState = document.getElementById(_opEmptyStateId());
         if (!panel) return;
         panel.style.display = "block";
         if (emptyState) emptyState.style.display = "none";
@@ -2451,12 +2556,18 @@
                 } else if (jobs.find(j => j.status === "awaiting_lcl_delivery_confirmation")) {
                     const j = jobs.find(x => x.status === "awaiting_lcl_delivery_confirmation");
                     const p = j.container_tab_preview || {};
+                    const e = j.edit_tab_preview || {};
+                    const fieldSpan = (val, hasVal) => hasVal
+                        ? `<b style="color:#0f9d76;">${escapeHtml(val)}</b>`
+                        : `<b style="color:#dc2626;">No data found on Shypple</b>`;
                     banner.innerHTML = `
                         <div class="process-banner process-banner-warn">
                             <i class="fa-solid fa-triangle-exclamation"></i>
-                            <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - Containers tab currently shows:
-                            <b>container</b> ${escapeHtml(p.container_number || "(empty)")}, <b>devanning date</b> ${escapeHtml(p.devanning_date || "(empty)")}.
-                            Confirm before moving to the Documents tab to upload the Delivery order?</span>
+                            <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - please manually verify before uploading the Delivery order:<br/>
+                            <b>Container</b> (Containers tab): ${fieldSpan(p.container_number, p.has_container)} &middot;
+                            <b>Devanning date</b> (Containers tab): ${fieldSpan(p.devanning_date, p.has_devanning_date)}<br/>
+                            <b>Customs number</b> (Edit tab): ${fieldSpan(e.customs_number, e.has_customs_number)} &middot;
+                            <b>Discharge CFS</b> (Edit tab): ${fieldSpan(e.cfs_address, e.has_cfs_address)}</span>
                             <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
                             <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
                         </div>`;
@@ -2553,23 +2664,30 @@
                 if (downloadLinks) details.push(`Download: ${downloadLinks}`);
             }
             if (job.downloaded_files && job.downloaded_files.length) {
-                // Local copies of the already-uploaded Shypple document(s) - saved
-                // (see save_document_locally) during the deep-compare step under
-                // their real filename, in this project's downloads folder. "View"
-                // opens it inline in a new tab (e.g. the browser's built-in PDF
-                // viewer) instead of trying to open the raw file in a text editor,
-                // which can't render binary formats like PDF/xlsx.
+                // Local copies of the document(s) this job touched, saved into this
+                // machine's real Downloads folder under their real filename (see
+                // save_document_locally / _save_mail_document_locally in
+                // shypple_process.py). f.source is "shypple" (CMR's deep-compare step,
+                // downloaded back from an already-uploaded Shypple document) or "mail"
+                // (LCL Arrivals/Release, saved right after fetching the attachment
+                // from the email, before it's ever uploaded to Shypple) - older
+                // entries saved before this field existed have no source, treated as
+                // "shypple" to match their only prior meaning. "View" opens it inline
+                // in a new tab (e.g. the browser's built-in PDF viewer) instead of
+                // trying to open the raw file in a text editor, which can't render
+                // binary formats like PDF/xlsx.
                 const localLinks = job.downloaded_files
                     .map(f => {
                         const base = `/api/operations/local_document/${encodeURIComponent(f.filename)}`;
+                        const sourceLabel = f.source === "mail" ? "from the email" : "from Shypple";
                         return `<span class="job-download-group">`
-                            + `<a class="job-download-link" title="Download the locally-saved '${escapeHtml(f.type)}' file from Shypple" href="${base}">`
+                            + `<a class="job-download-link" title="Download the locally-saved '${escapeHtml(f.type)}' file (${sourceLabel})" href="${base}">`
                             + `<i class="fa-solid fa-folder-open"></i> ${escapeHtml(f.filename)}</a>`
                             + `<a class="job-download-link" title="View '${escapeHtml(f.type)}' in the browser" href="${base}?inline=1" target="_blank">`
                             + `<i class="fa-solid fa-eye"></i> View</a></span>`;
                     })
                     .join(" ");
-                if (localLinks) details.push(`Local copy (from Shypple): ${localLinks}`);
+                if (localLinks) details.push(`Local copy (in Downloads): ${localLinks}`);
             }
             if (job.uploaded_count) {
                 details.push(`<span style="color:#0f9d76;"><i class="fa-solid fa-check"></i> Uploaded ${job.uploaded_count} document(s)</span>`);
@@ -2591,6 +2709,11 @@
             } else if (job.star_status === "failed") {
                 const starColor = job.star_color || "blue";
                 details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-star-half-stroke"></i> ${starColor[0].toUpperCase()}${starColor.slice(1)} star NOT set: ${escapeHtml(job.star_error || "unknown error")}</span>`);
+            }
+            if (job.read_status === "done") {
+                details.push('<span style="color:#0f9d76;"><i class="fa-solid fa-envelope-open"></i> Marked source email as READ</span>');
+            } else if (job.read_status === "failed") {
+                details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-envelope"></i> Could not mark source email as read: ${escapeHtml(job.read_error || "unknown error")}</span>`);
             }
             if (job.forward_status === "sent") {
                 details.push('<span style="color:#0f9d76;"><i class="fa-solid fa-check"></i> Email forwarded to nl.importsea@shypple.com and labeled a-release-orders there</span>');

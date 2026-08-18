@@ -267,15 +267,16 @@ def _normalize_type(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-# Where locally-saved copies of already-uploaded Shypple documents go - see
-# save_document_locally(). The CURRENT machine/user's real Downloads folder (see
-# get_downloads_dir) - never a hardcoded path, since this project runs on different
-# company machines/accounts. Clicking a document link directly in Shypple's own admin
-# UI triggers a native browser download with an extension-less UUID filename
-# (Shypple's response doesn't set a usable Content-Disposition filename), which Chrome
-# then can't open. Saving our own copy here, under the document's real filename,
-# sidesteps that entirely - we already fetch these bytes for the deep-compare step
-# below anyway.
+# Where locally-saved copies of documents this pipeline touches go - see
+# save_document_locally()/_save_mail_document_locally(). The CURRENT machine/user's
+# real Downloads folder (see get_downloads_dir) - never a hardcoded path, since this
+# project runs on different company machines/accounts. Clicking a document link
+# directly in Shypple's own admin UI triggers a native browser download with an
+# extension-less UUID filename (Shypple's response doesn't set a usable
+# Content-Disposition filename), which Chrome then can't open. Saving our own copy
+# here, under the document's real filename, sidesteps that entirely - we already fetch
+# these bytes anyway, either downloaded back from Shypple for the CMR deep-compare
+# step, or fetched from the email itself before it's uploaded (LCL Arrivals/Release).
 DOWNLOADS_DIR = get_downloads_dir()
 
 
@@ -311,6 +312,24 @@ def save_document_locally(data_bytes, filename):
     with open(target_path, "wb") as f:
         f.write(data_bytes)
     return os.path.basename(target_path)
+
+
+def _save_mail_document_locally(job, doc_type, data_bytes, filename):
+    """Save a document just fetched FROM THE EMAIL (before it's uploaded to Shypple -
+    see handle_arrival_notice/handle_delivery_order) into the real Downloads folder,
+    same as save_document_locally already does for a document downloaded back FROM
+    Shypple during the CMR deep-compare step. Records it into job["downloaded_files"]
+    with source="mail" so the dashboard can label it correctly (the existing entries
+    from the Shypple-side save all implicitly mean source="shypple" - see
+    renderOperationsPanel's job.downloaded_files block). Never raises - a failure to
+    save a local copy is logged but must not abort the actual Shypple upload."""
+    try:
+        saved_filename = save_document_locally(data_bytes, filename or f"{doc_type}.pdf")
+        log_job(job, f"Saved a local copy of '{doc_type}' ({saved_filename}) from the mail to Downloads.")
+        with STATE_LOCK:
+            job.setdefault("downloaded_files", []).append({"type": doc_type, "filename": saved_filename, "source": "mail"})
+    except Exception as e:
+        log_job(job, f"Could not save a local copy of '{doc_type}' from the mail: {e}")
 
 
 def _find_uploaded_row_for_type(extracted_type, doc_rows, exclude=(), email_containers=()):
@@ -379,25 +398,34 @@ def extract_container_from_label(label):
 
 
 def ensure_shypple_login(page, email, password):
-    log_system("Checking Shypple login state...")
-    page.goto(SHYPPLE_LOGIN_URL)
-    page.wait_for_timeout(1500)
-    if "/dashboard" in page.url:
-        log_system("Already logged in (persistent session).")
+    log_system("Checking Shypple session state...")
+    # Fast-path: check if we are already on an authenticated admin or dashboard page
+    current_url = page.url
+    if "api.shypple.com/admin" in current_url or "/dashboard" in current_url:
+        log_system("Already logged in (active browser session).")
         return
+
+    # Try navigating directly to the admin bootstrap URL first to avoid extra login redirects
     try:
-        page.wait_for_selector('input[name="email"]', timeout=10000)
+        _safe_goto(page, SHYPPLE_BOOTSTRAP_URL)
+        page.wait_for_timeout(1500)
+        if _has_admin_access(page, timeout=3000):
+            log_system("Already authenticated on Shypple admin.")
+            return
     except Exception:
-        log_system("Login form did not appear - leaving as-is (may already be authenticated).")
-        return
-    if not email or not password:
-        log_system("SHYPPLE_EMAIL / SHYPPLE_PASSWORD are not set - cannot auto-fill login.")
-        return
-    page.fill('input[name="email"]', email)
-    page.fill('input[name="password"]', password)
-    page.press('input[name="password"]', "Enter")
-    page.wait_for_timeout(3000)
-    log_system("Submitted Shypple login form.")
+        pass
+
+    # If login form appears, auto-fill credentials if provided
+    try:
+        page.wait_for_selector('input[name="email"]', timeout=3000)
+        if email and password:
+            page.fill('input[name="email"]', email)
+            page.fill('input[name="password"]', password)
+            page.press('input[name="password"]', "Enter")
+            page.wait_for_timeout(2500)
+            log_system("Submitted Shypple login form.")
+    except Exception:
+        log_system("No email login form present or already authenticated.")
 
 
 def _has_admin_access(page, timeout=6000):
@@ -441,6 +469,18 @@ def _safe_goto(page, url, attempts=3):
     raise last_err
 
 
+def _save_shypple_session_tokens(page):
+    """Save authentication cookies, local storage, and session tokens to disk
+    so 2FA and login sessions persist reliably across restarts."""
+    try:
+        storage_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "shypple_profile", "storage_state.json"))
+        os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+        page.context.storage_state(path=storage_path)
+        log_system(f"Saved Shypple authentication & 2FA tokens to: {storage_path}")
+    except Exception as e:
+        log_system(f"Could not save session tokens: {e}")
+
+
 def ensure_admin_access(page):
     """Navigate to the admin app; if it's gated behind Google SSO, pause and wait for
     a human to complete that sign-in in this same browser window, then resume."""
@@ -448,6 +488,7 @@ def ensure_admin_access(page):
     _safe_goto(page, SHYPPLE_BOOTSTRAP_URL)
     page.wait_for_timeout(2000)
     if _has_admin_access(page):
+        _save_shypple_session_tokens(page)
         return
 
     log_system("Admin access needs a manual Google sign-in. Waiting for Proceed...")
@@ -466,6 +507,7 @@ def ensure_admin_access(page):
     page.wait_for_timeout(2000)
     if _has_admin_access(page, timeout=5000):
         log_system("Admin access confirmed (already on the right page after sign-in).")
+        _save_shypple_session_tokens(page)
         return
 
     try:
@@ -477,6 +519,7 @@ def ensure_admin_access(page):
     if not _has_admin_access(page, timeout=10000):
         raise RuntimeError("Still can't reach the Shypple admin after manual login - please retry.")
     log_system("Admin access confirmed.")
+    _save_shypple_session_tokens(page)
 
 
 def _switch_shypple_org(page, org_name):
@@ -1023,6 +1066,38 @@ def edit_preceding_customs_and_cfs(page, customs_number, cfs_address):
         }""", prefix)
         log_system(f"Set Discharge CFS option matching '{prefix}': {matched}")
 
+
+def check_edit_tab_customs_and_cfs(page):
+    """Read-only check of the shipment Edit tab's Preceding Customs Number
+    (#shipment_preceding_customs_number) and Discharge CFS (#shipment_discharge_cfs_id)
+    fields - the SAME selectors edit_preceding_customs_and_cfs uses to WRITE these
+    fields for the Arrival Notice flow, reused here purely to report whether Shypple
+    already has data in them. Delivery order's manual-verification step (see
+    handle_delivery_order) only needs to SHOW these values to the operator alongside
+    the Containers tab's container/devanning date - it never fills or saves anything
+    on this tab, unlike the Arrival Notice flow."""
+    edit_link = page.query_selector('a[href*="/edit"]')
+    if edit_link:
+        href = edit_link.get_attribute("href")
+        if href:
+            _safe_goto(page, SHYPPLE_ADMIN_BASE + href)
+    page.wait_for_selector("#shipment_preceding_customs_number", timeout=8000)
+    return page.evaluate("""() => {
+        const custEl = document.getElementById('shipment_preceding_customs_number');
+        const custVal = custEl ? custEl.value.trim() : "";
+        const cfsSel = document.getElementById('shipment_discharge_cfs_id');
+        let cfsVal = "";
+        if (cfsSel && cfsSel.selectedOptions && cfsSel.selectedOptions.length) {
+            const opt = cfsSel.selectedOptions[0];
+            if (opt && opt.value) cfsVal = (opt.textContent || '').trim();
+        }
+        return {
+            customs_number: custVal,
+            has_customs_number: !!custVal,
+            cfs_address: cfsVal,
+            has_cfs_address: !!cfsVal,
+        };
+    }""")
 
 
 def download_shypple_document_bytes(page, href):
@@ -1722,6 +1797,7 @@ def _record_my_jewellery_flag(job):
         "message_id": job.get("message_id"),
         "subject": job.get("subject", ""),
         "sf_number": job.get("sf_number", ""),
+        "mail_date": job.get("date", ""),
         "flagged_at": datetime.now(timezone.utc).isoformat(),
     }
     with _MY_JEWELLERY_TRACKER_LOCK:
@@ -1952,6 +2028,8 @@ def handle_arrival_notice(page, job):
                        reason=f"Could not fetch the Arrival notice attachment: {fetch_error}")
         return
 
+    _save_mail_document_locally(job, "Arrival notice", file_bytes, filename)
+
     open_documents_tab(page)
     fill_result = fill_shipment_document_form(page, "Arrival notice", file_bytes, file_mime, filename, [], None)
     if not fill_result.get("success"):
@@ -1989,12 +2067,31 @@ def handle_delivery_order(page, job):
     with STATE_LOCK:
         job["container_tab_check"] = current
 
+    # New manual-verification requirement (in addition to the Containers tab check
+    # above, unchanged): also read the Edit tab's Preceding Customs Number and
+    # Discharge CFS - same selectors edit_preceding_customs_and_cfs uses to WRITE
+    # these fields for Arrival Notice, reused here read-only. This is purely
+    # informational for the operator's confirmation below - it does not gate the
+    # container/devanning-date check just below, which is unchanged.
+    set_job_status(job, "processing", phase="Checking Edit tab (customs number & discharge CFS)")
+    edit_check = check_edit_tab_customs_and_cfs(page)
+    with STATE_LOCK:
+        job["edit_tab_check"] = edit_check
+    # check_edit_tab_customs_and_cfs navigated to the shipment's /edit page to read
+    # these fields (no form submit) - return to the main shipment page (tab bar) before
+    # anything below that needs it (open_documents_tab after confirmation).
+    if job.get("shipment_path"):
+        _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
+
     set_job_status(
         job, "awaiting_lcl_delivery_confirmation",
-        phase="Waiting for confirmation - verify container number & devanning date are already set",
+        phase="Waiting for confirmation - verify container/devanning date (Containers tab) and "
+              "customs number/discharge CFS (Edit tab) are already set",
         container_tab_preview=current,
+        edit_tab_preview=edit_check,
     )
-    log_job(job, f"Containers tab currently shows: {current}. Waiting for confirmation before moving to Documents.")
+    log_job(job, f"Containers tab currently shows: {current}. Edit tab currently shows: {edit_check}. "
+                 "Waiting for confirmation before moving to Documents.")
     if not _wait_for_confirmation(job):
         set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
         log_job(job, "Skipped by operator - left as-is.")
@@ -2021,6 +2118,8 @@ def handle_delivery_order(page, job):
         set_job_status(job, "lcl_no_document_found",
                        reason=f"Could not fetch the Delivery order attachment: {fetch_error}")
         return
+
+    _save_mail_document_locally(job, "Delivery order", file_bytes, filename)
 
     container_number = current.get("container_number")
     open_documents_tab(page)
@@ -2080,6 +2179,8 @@ def handle_delivery_order(page, job):
             log_job(job, f"Could not fetch additional Delivery order document {extra_i}/{total_extra} "
                          f"(attachment_index={attachment_index}): {extra_fetch_error} - skipping it.")
             continue
+
+        _save_mail_document_locally(job, "Delivery order", extra_bytes, extra_filename)
 
         # Defensive re-navigation: fill_shipment_document_form requires being on the
         # Documents tab, and the previous submit's post-submit page state isn't

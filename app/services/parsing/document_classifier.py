@@ -1779,6 +1779,26 @@ _DEVANNING_DATE_LABEL_RE = re.compile(
 )
 
 
+def extract_lcl_arrival_data(text):
+    """Extract data fields required for LCL Arrivals:
+    - container_number (ISO 6346)
+    - devanning_date / available date at cfs (YYYY-MM-DD)
+    - customs_number (preceding customs number, e.g., 641761FPS-01)
+    - cfs_address / warehouse (e.g. CTG Logistics)
+    """
+    if not text:
+        return {}
+
+    containers = find_container_numbers(text)
+    container_number = containers[0] if containers else None
+
+    # Date extraction: ONLY extract a date if it is explicitly labeled as a
+    # devanning, available, or delay date via _DEVANNING_DATE_LABEL_RE.
+    # We deliberately do NOT fall back to bare/unlabeled date scans in the document
+    # because that would mistakenly grab unrelated dates like vessel ETA or issue date.
+    label_match = _DEVANNING_DATE_LABEL_RE.search(text)
+    devanning_date = _normalize_date_str(label_match.group(1)) if label_match else None
+
 _INVALID_CUSTOMS_WORDS_RE = re.compile(
     r"\b(?:"
     r"vessel|voyage|vsl|vyg|voy|ship|feeder|flag|imo|mmsi"

@@ -48,6 +48,14 @@ _SCRAPED_EMAILS_PATH = os.path.abspath(
 _LCL_SCRAPED_EMAILS_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "scraped_emails_lcl.json")
 )
+# Written directly by scripts/shypple_process.py's _record_my_jewellery_flag (a plain
+# file, not a control-server endpoint - that process only exposes /status and
+# /document_type_options as GETs) whenever the LCL Arrivals flow finds a shipment
+# whose Shypple customer name is "My Jewellery" - read here for the sidebar's
+# "My Jewellery Mails" module.
+_LCL_MY_JEWELLERY_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "lcl_my_jewellery_mails.json")
+)
 # Matches tracking_api.py's _LCL_LABEL_KEY / document_classifier.py's
 # _LCL_ARRIVALS_LABEL - selects the lcl-arrivals label override (Arrival notice/
 # Delivery order/Other only) in classify_email_meta/resolve_deep_classification/
@@ -397,6 +405,7 @@ def lcl_arrivals_process():
             "subject": subject,
             "mail_type": mail_type,
             "sf_number": sf_number,
+            "date": scraped_email.get("date", ""),
         }
 
         if not mid.startswith("pw_"):
@@ -848,6 +857,47 @@ def forwarded_mails_list():
             "success": False,
             "error": f"Could not reach the Gmail automation browser: {e}. Make sure it's running.",
         }), 500
+
+
+@operations_api_bp.route("/operations/lcl_my_jewellery_mails", methods=["GET"])
+def lcl_my_jewellery_mails_list():
+    """Every LCL Arrivals mail halted because the matched Shypple shipment's customer
+    is "My Jewellery" (see shypple_process.py's _record_my_jewellery_flag), most
+    recently flagged first - powers the sidebar's "My Jewellery Mails" module."""
+    entries = []
+    if os.path.exists(_LCL_MY_JEWELLERY_PATH):
+        try:
+            with open(_LCL_MY_JEWELLERY_PATH, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except Exception as e:
+            return jsonify({"success": False, "error": f"Could not read the tracker file: {e}"}), 500
+    entries = sorted(entries, key=lambda e: e.get("flagged_at", ""), reverse=True)
+    return jsonify({"success": True, "entries": entries})
+
+
+@operations_api_bp.route("/operations/lcl_my_jewellery_mails/delete", methods=["POST"])
+def delete_lcl_my_jewellery_mail():
+    """Remove one entry from the My Jewellery tracker (e.g. once an operator has
+    manually handled it) - does not touch the source email itself."""
+    data = request.get_json(silent=True) or {}
+    message_id = data.get("message_id")
+    if not message_id:
+        return jsonify({"success": False, "error": "message_id is required."}), 400
+    entries = []
+    if os.path.exists(_LCL_MY_JEWELLERY_PATH):
+        try:
+            with open(_LCL_MY_JEWELLERY_PATH, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+        except Exception as e:
+            return jsonify({"success": False, "error": f"Could not read the tracker file: {e}"}), 500
+    remaining = [e for e in entries if e.get("message_id") != message_id]
+    if len(remaining) == len(entries):
+        return jsonify({"success": False, "error": "No entry found with that message_id."}), 404
+    tmp = _LCL_MY_JEWELLERY_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(remaining, f, indent=2)
+    os.replace(tmp, _LCL_MY_JEWELLERY_PATH)
+    return jsonify({"success": True, "remaining": len(remaining)})
 
 
 @operations_api_bp.route("/operations/forwarded_mails/delete", methods=["POST"])

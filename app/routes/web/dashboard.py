@@ -58,6 +58,7 @@ def index():
         oauth_configured=oauth_configured,
         token_present=token_present,
         selected_label=label,
+        active_page=("lcl" if label == "lcl-arrivals---release" else "cmr"),
         ui_version=_ui_version()
     ))
     # Never let Chrome's persistent-profile disk cache serve a stale copy of the
@@ -75,6 +76,11 @@ def cmr_process():
 @dashboard_bp.route("/lcl-arrivals")
 def lcl_arrivals():
     return redirect(url_for("dashboard.index", label="lcl-arrivals---release"))
+
+
+@dashboard_bp.route("/lcl-my-jewellery")
+def lcl_my_jewellery():
+    return render_template("pages/my_jewellery.html", active_page="my_jewellery")
 
 
 @dashboard_bp.route("/login/google")
