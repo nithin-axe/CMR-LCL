@@ -214,15 +214,39 @@ incoming_batches = queue.Queue()
 _skip_requested = False
 
 
+def _open_confirmation_gate():
+    """Clear proceed_event BEFORE the corresponding "awaiting_..." job status (or,
+    for ensure_admin_access, batch_state["paused_reason"]) becomes visible to the
+    operator - every caller must call this first, then make the gate visible, and
+    only later call _wait_for_confirmation - never the other way round.
+
+    This fixes a real bug: proceed_event.clear() used to live inside
+    _wait_for_confirmation itself, called right before .wait(). That's fine when
+    nothing but a log line sits between the status update and _wait_for_confirmation,
+    but the org-switch gate (see process_one_job) also fires a best-effort blue-star
+    click in that gap, which can take up to ~70s (see _star_source_email). An
+    operator who clicked "Confirm switch" while that star click was still running hit
+    proceed_event.set() from the /proceed handler BEFORE _wait_for_confirmation ever
+    ran - so its .clear() silently wiped out that already-landed click, and the wait
+    afterward blocked until a SECOND click set the event again. Clearing here, before
+    the gate is even visible, closes that gap entirely: a click landing anytime after
+    the button appears - including mid-star-click - sets an event that's already
+    cleared and stays set until _wait_for_confirmation's .wait() picks it up, however
+    long that takes."""
+    proceed_event.clear()
+
+
 def _wait_for_confirmation(job):
     """Block until the operator either confirms (proceed_event alone) or skips this job
     (/skip, which sets _skip_requested before also setting proceed_event to wake this
-    same wait). Returns True to proceed with the paused action as normal, False if the
-    operator chose to skip - callers must stop there and return without performing the
-    action, leaving the source email untouched (no star, no read/unread change) so it's
-    easy to find and reprocess later."""
+    same wait). The caller must already have called _open_confirmation_gate() before
+    making the "awaiting_..." status visible - see that function's docstring for why
+    this one no longer clears the event itself. Returns True to proceed with the
+    paused action as normal, False if the operator chose to skip - callers must stop
+    there and return without performing the action, leaving the source email
+    untouched (no star, no read/unread change) so it's easy to find and reprocess
+    later."""
     global _skip_requested
-    proceed_event.clear()
     proceed_event.wait()
     with STATE_LOCK:
         skipped = _skip_requested
@@ -492,9 +516,9 @@ def ensure_admin_access(page):
         return
 
     log_system("Admin access needs a manual Google sign-in. Waiting for Proceed...")
+    _open_confirmation_gate()
     with STATE_LOCK:
         batch_state["paused_reason"] = "google_login"
-    proceed_event.clear()
     proceed_event.wait()
     with STATE_LOCK:
         batch_state["paused_reason"] = None
@@ -684,6 +708,37 @@ def switch_to_fresh_org(page):
     responsible for switching back via ensure_org_is_shypple_bv once done with this
     job."""
     _switch_shypple_org(page, FRESH_ORG_NAME)
+
+
+def _ensure_org_before_documents_tab(page, job, expected_org=None):
+    """Safety-net check run right before every Documents-tab open, across both the
+    CMR and LCL Arrivals/Release pipelines: verifies the currently active Shypple
+    organization is expected_org (defaults to TARGET_ORG_NAME, "Shypple B.V." - the
+    primary org for every shipment) and switches to it first if not.
+    _switch_shypple_org is already idempotent (a no-op if the expected org is already
+    active), so this is cheap on the normal path - it only does real work if an
+    earlier job in the same batch left Shypple on the wrong organization (e.g. a
+    failed Fresh B.V. switch-back after that job's own upload), which would otherwise
+    silently carry over into THIS job's document upload with no warning.
+
+    A CMR job whose shipment was only found under FRESH_ORG_NAME via the
+    empty-organization fallback (see process_one_job/switch_to_fresh_org) must pass
+    job.get("organization_switched_to") as expected_org - forcing TARGET_ORG_NAME here
+    for that job would incorrectly switch AWAY from the only organization its
+    shipment actually exists under, mid-upload.
+
+    Sets the job to "error" and returns False on failure so the caller can stop
+    before opening Documents tab; True means it's safe to proceed."""
+    expected_org = expected_org or TARGET_ORG_NAME
+    try:
+        _switch_shypple_org(page, expected_org)
+        return True
+    except Exception as e:
+        set_job_status(job, "error",
+                        error=f"Could not verify/switch to organization '{expected_org}' before opening "
+                              f"the Documents tab: {e}")
+        log_job(job, f"Organization check before Documents tab failed: {e}")
+        return False
 
 
 def find_matching_shipment(page, year):
@@ -1948,6 +2003,7 @@ def handle_delay_or_devanning(page, job):
     if (current.get("devanning_date") or "") == extracted_date:
         log_job(job, f"Devanning date already matches Shypple ({extracted_date}) - no change needed.")
     else:
+        _open_confirmation_gate()
         set_job_status(
             job, "awaiting_lcl_date_confirmation",
             phase="Waiting for confirmation to update the devanning date",
@@ -1986,6 +2042,7 @@ def handle_arrival_notice(page, job):
     # pipeline's manual-confirmation-gates-before-anything-is-written design.
     add_container_and_devanning_date(page, container_number, devanning_date, save=False)
 
+    _open_confirmation_gate()
     set_job_status(
         job, "awaiting_lcl_container_confirmation",
         phase="Waiting for confirmation - container & devanning date filled",
@@ -2030,6 +2087,8 @@ def handle_arrival_notice(page, job):
 
     _save_mail_document_locally(job, "Arrival notice", file_bytes, filename)
 
+    if not _ensure_org_before_documents_tab(page, job):
+        return
     open_documents_tab(page)
     fill_result = fill_shipment_document_form(page, "Arrival notice", file_bytes, file_mime, filename, [], None)
     if not fill_result.get("success"):
@@ -2037,6 +2096,7 @@ def handle_arrival_notice(page, job):
         log_job(job, f"Failed to prepare the Arrival notice upload: {fill_result.get('error')}")
         return
 
+    _open_confirmation_gate()
     set_job_status(
         job, "awaiting_lcl_submit_confirmation",
         phase="Waiting for confirmation to submit the Arrival notice document",
@@ -2083,6 +2143,7 @@ def handle_delivery_order(page, job):
     if job.get("shipment_path"):
         _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
 
+    _open_confirmation_gate()
     set_job_status(
         job, "awaiting_lcl_delivery_confirmation",
         phase="Waiting for confirmation - verify container/devanning date (Containers tab) and "
@@ -2122,6 +2183,8 @@ def handle_delivery_order(page, job):
     _save_mail_document_locally(job, "Delivery order", file_bytes, filename)
 
     container_number = current.get("container_number")
+    if not _ensure_org_before_documents_tab(page, job):
+        return
     open_documents_tab(page)
     fill_result = fill_shipment_document_form(
         page, "Delivery order", file_bytes, file_mime, filename,
@@ -2132,6 +2195,7 @@ def handle_delivery_order(page, job):
         log_job(job, f"Failed to prepare the Delivery order upload: {fill_result.get('error')}")
         return
 
+    _open_confirmation_gate()
     set_job_status(
         job, "awaiting_lcl_submit_confirmation",
         phase="Waiting for confirmation to submit the Delivery order document",
@@ -2185,6 +2249,10 @@ def handle_delivery_order(page, job):
         # Defensive re-navigation: fill_shipment_document_form requires being on the
         # Documents tab, and the previous submit's post-submit page state isn't
         # guaranteed (a redirect elsewhere would silently break this fill otherwise).
+        if not _ensure_org_before_documents_tab(page, job):
+            log_job(job, f"Skipping additional Delivery order document {extra_i}/{total_extra} - "
+                         "could not verify/switch the Shypple organization.")
+            continue
         open_documents_tab(page)
         extra_fill_result = fill_shipment_document_form(
             page, "Delivery order", extra_bytes, extra_mime, extra_filename,
@@ -2195,6 +2263,7 @@ def handle_delivery_order(page, job):
                          f"upload: {extra_fill_result.get('error')} - skipping it.")
             continue
 
+        _open_confirmation_gate()
         set_job_status(
             job, "awaiting_lcl_submit_confirmation",
             phase=f"Waiting for confirmation to submit additional Delivery order document {extra_i}/{total_extra}",
@@ -2381,6 +2450,7 @@ def process_one_job(page, job):
             _star_source_email(job, "purple")
             return
         if not any_candidates_seen:
+            _open_confirmation_gate()
             set_job_status(
                 job, "awaiting_no_record_confirmation",
                 phase="Waiting for confirmation - no record found on Shypple",
@@ -2414,10 +2484,11 @@ def process_one_job(page, job):
         # comment). That's fine for the star itself, but it must never delay the
         # confirmation banner - an operator waiting to click "Confirm switch" doesn't
         # care about a decorative star and shouldn't have to wait up to a minute just to
-        # see the banner appear. set_job_status only updates shared state (cheap,
-        # instant); _wait_for_confirmation below is Event-based, so a confirm click that
-        # lands while the star is still retrying is not lost - it's simply already-set
-        # by the time this thread reaches that wait.
+        # see the banner appear. _open_confirmation_gate() (called first, below) is
+        # what actually guarantees a click landing during that ~70s window isn't lost -
+        # see its own docstring for the bug this fixed (a confirm click used to need a
+        # second click to register whenever it landed while the star was still retrying).
+        _open_confirmation_gate()
         set_job_status(job, "awaiting_org_switch_confirmation",
                         phase="Waiting for confirmation to switch organization",
                         tried_containers=tried, target_org=FRESH_ORG_NAME)
@@ -2516,6 +2587,8 @@ def _verify_and_upload_documents(page, job, match, containers):
         log_job(job, "All container numbers from the email are present on the shipment.")
 
     set_job_status(job, "processing", phase="Verifying documents")
+    if not _ensure_org_before_documents_tab(page, job, expected_org=job.get("organization_switched_to")):
+        return
     open_documents_tab(page)
     doc_rows = scrape_document_rows(page)
     uploaded_types_raw = [t for row in doc_rows for t in (row.get("types") or [])]
@@ -2627,6 +2700,7 @@ def _verify_and_upload_documents(page, job, match, containers):
         log_job(job, "All extracted document types are present on Shypple and verified as matching.")
         return
 
+    _open_confirmation_gate()
     set_job_status(job, "awaiting_upload_confirmation", phase="Waiting for manual confirmation",
                     missing_doc_types=[n["type"] for n in needs_upload])
     log_job(job, f"Document(s) needing upload: {needs_upload}. Waiting for confirmation before upload.")
@@ -2648,6 +2722,8 @@ def _verify_and_upload_documents(page, job, match, containers):
         customer_name = read_shipment_customer(page)
         if not customer_name:
             log_job(job, "Could not read the Customer name from the Info tab - uploads that need it will skip organization.")
+        if not _ensure_org_before_documents_tab(page, job, expected_org=job.get("organization_switched_to")):
+            return
         open_documents_tab(page)
 
     uploaded_count, upload_failures = 0, []
@@ -2674,6 +2750,7 @@ def _verify_and_upload_documents(page, job, match, containers):
         # Pause here, form filled but NOT submitted yet - per explicit request, a human
         # must verify the file/type/containers/organization before Create Shipment
         # document is actually clicked.
+        _open_confirmation_gate()
         set_job_status(
             job, "awaiting_submit_confirmation",
             phase=f"Waiting for confirmation to submit '{t}'",
