@@ -2180,6 +2180,7 @@
         "awaiting_org_switch_confirmation",
         "awaiting_lcl_container_confirmation", "awaiting_lcl_submit_confirmation",
         "awaiting_lcl_delivery_confirmation", "awaiting_lcl_date_confirmation",
+        "awaiting_arrival_notice_verification",
     ];
 
     function renderBlockedBanner(state) {
@@ -2378,6 +2379,7 @@
         awaiting_lcl_submit_confirmation: "Document form filled - awaiting confirmation to submit",
         awaiting_lcl_delivery_confirmation: "Awaiting confirmation - verify Containers/Edit tab data",
         awaiting_lcl_date_confirmation: "Awaiting confirmation to update devanning date",
+        awaiting_arrival_notice_verification: "Awaiting confirmation - verify Arrival Notice vs Edit tab",
         lcl_done: "Done - read + yellow starred",
         skipped_cluster_or_fcl: "Skipped - Cluster 3 or FCL",
         flagged_my_jewellery: "Flagged - My Jewellery customer",
@@ -2396,6 +2398,7 @@
             || status === "skipped_by_operator"
             || status === "awaiting_lcl_container_confirmation" || status === "awaiting_lcl_submit_confirmation"
             || status === "awaiting_lcl_delivery_confirmation" || status === "awaiting_lcl_date_confirmation"
+            || status === "awaiting_arrival_notice_verification"
             || status === "skipped_cluster_or_fcl" || status === "flagged_my_jewellery"
             || status === "lcl_incomplete_container" || status === "lcl_no_date_found"
             || status === "lcl_no_document_found") return "job-badge-warn";
@@ -2424,6 +2427,21 @@
         window.__activeBatchMessageIds = window.__activeBatchMessageIds || null;
         let jobs = state.jobs || [];
         if (window.__activeBatchMessageIds && window.__activeBatchMessageIds.size > 0) {
+            // Self-healing: a Delivery Order's Arrival Notice cross-verification can
+            // discover a mail via BL-number search mid-batch and insert it as its OWN
+            // job (see shypple_process.py's _process_discovered_arrival_notice),
+            // carrying parent_message_id pointing at the Delivery Order job that
+            // spawned it. That parent is already trusted in this Set (it was part of
+            // the original selection) - extend trust to its children too, so the
+            // sub-job's own gate isn't silently dropped from every render just
+            // because this Set was frozen before the sub-job ever existed. This does
+            // NOT loosen the filter for anything else - an unrelated stale job from a
+            // previous batch has no parent_message_id pointing into this Set.
+            jobs.forEach(j => {
+                if (j.parent_message_id && window.__activeBatchMessageIds.has(j.parent_message_id)) {
+                    window.__activeBatchMessageIds.add(j.message_id);
+                }
+            });
             const filtered = jobs.filter(j => window.__activeBatchMessageIds.has(j.message_id));
             // Only trust the client-side filter when it actually matches something the
             // server is reporting. If it matches nothing - stale ids left over from a
@@ -2570,6 +2588,31 @@
                             <b>Discharge CFS</b> (Edit tab): ${fieldSpan(e.cfs_address, e.has_cfs_address)}</span>
                             <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
                             <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                        </div>`;
+                } else if (jobs.find(j => j.status === "awaiting_arrival_notice_verification")) {
+                    const j = jobs.find(x => x.status === "awaiting_arrival_notice_verification");
+                    const c = j.arrival_notice_check || {};
+                    const ex = c.extracted || {};
+                    const cur = c.current_edit_tab || {};
+                    const fieldRow = (label, extractedVal, currentVal, matched) => {
+                        if (!extractedVal) {
+                            return `<b>${label}:</b> <span style="color:#b45309;">Could not extract from Arrival Notice - manual verification needed</span> (Edit tab currently: ${escapeHtml(currentVal || "(empty)")})`;
+                        }
+                        const verdict = matched
+                            ? `<span style="color:#0f9d76;">match</span>`
+                            : `<span style="color:#dc2626;">mismatch - will correct from Arrival Notice</span>`;
+                        return `<b>${label}:</b> Arrival Notice says <b>${escapeHtml(extractedVal)}</b>, Edit tab has <b>${escapeHtml(currentVal || "(empty)")}</b> (${verdict})`;
+                    };
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - verify Arrival Notice data
+                            (${escapeHtml(c.filename || "existing document")}) against the Edit tab before continuing this Delivery Order:<br/>
+                            ${fieldRow("Customs Number", ex.customs_number, cur.customs_number, c.customs_match)}<br/>
+                            ${fieldRow("Discharge CFS", ex.cfs_address, cur.cfs_address, c.cfs_match)}
+                            ${c.needs_manual_verification ? '<br/><span style="color:#b45309;"><i class="fa-solid fa-circle-info"></i> Neither field could be extracted from the document - please verify manually.</span>' : ""}</span>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Yes, verified</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">No, not verified</button>
                         </div>`;
                 } else if (jobs.find(j => j.status === "awaiting_lcl_date_confirmation")) {
                     const j = jobs.find(x => x.status === "awaiting_lcl_date_confirmation");

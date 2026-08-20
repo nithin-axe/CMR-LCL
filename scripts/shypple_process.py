@@ -1720,6 +1720,62 @@ def _compare_document_versions_remote(message_id, doc_type, other_bytes, other_m
         return {"same": None, "reason": str(e)}
 
 
+def _extract_lcl_fields_remote(data_bytes, mime, filename=""):
+    """POST to Flask's /operations/extract_lcl_fields_from_bytes, which runs the
+    regex+LLM field-extraction pipeline directly against a document's bytes (that
+    logic lives in document_classifier.py, not duplicated here) - same
+    request/response shape as _compare_document_versions_remote above, but for a
+    document with no message_id involved (e.g. one just downloaded from Shypple's own
+    Documents tab - see the Delivery Order -> Arrival Notice cross-verification flow
+    in handle_delivery_order). Returns the extracted dict
+    ({container_number/devanning_date/customs_number/cfs_address}) on success, or {}
+    on any failure - never raises, so a Flask/network hiccup here degrades to "could
+    not extract" (manual verification) rather than crashing the job."""
+    try:
+        body = json.dumps({
+            "file_base64": base64.b64encode(data_bytes).decode("ascii"),
+            "mime": mime or "application/pdf",
+            "filename": filename,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{FLASK_BASE}/api/operations/extract_lcl_fields_from_bytes", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=200) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if result.get("success"):
+            return result.get("extracted") or {}
+        log_system(f"_extract_lcl_fields_remote: Flask reported failure: {result.get('error')}")
+        return {}
+    except Exception as e:
+        log_system(f"_extract_lcl_fields_remote error: {e}")
+        return {}
+
+
+def _search_bl_number_remote(bl_number):
+    """Ask the Gmail automation to search the lcl-arrivals---release label for
+    bl_number (see scripts/open_gmail.py's new /search_label action, backed by
+    search_lcl_label) - used by the Delivery Order -> Arrival Notice
+    cross-verification flow (handle_delivery_order) when no Arrival Notice document
+    is found on Shypple yet. Returns the list of matching mails (same per-mail shape
+    the normal LCL scrape already produces - id/subject/snippet/attachmentNames/
+    hasAttachment/...) or [] on any failure - never raises, so a Gmail-automation
+    hiccup here just means "no Arrival Notice mail found," falling through to
+    continuing the Delivery Order unchanged rather than blocking the job."""
+    try:
+        params = urllib.parse.urlencode({"label": _LCL_LABEL_KEY, "query": bl_number})
+        url = f"{GMAIL_CONTROL_SERVER}/search_label?{params}"
+        with urllib.request.urlopen(url, timeout=25) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if result.get("success"):
+            return result.get("results") or []
+        log_system(f"_search_bl_number_remote: Gmail automation reported failure: {result.get('error')}")
+        return []
+    except Exception as e:
+        log_system(f"_search_bl_number_remote error: {e}")
+        return []
+
+
 def _star_source_email(job, color):
     """Ask the Gmail automation to mark this job's source email with a colored star -
     "blue" fires when a matched shipment has no organization (independent of the
@@ -2121,7 +2177,279 @@ def handle_arrival_notice(page, job):
     set_job_status(job, "lcl_done", phase="Done - Arrival notice processed")
 
 
+def _values_match_customs(extracted, current):
+    """Normalized equality for Customs Number - both sides are plain text, so a
+    trim+uppercase+strip-punctuation compare is enough (unlike Discharge CFS below,
+    neither side is a dropdown label needing prefix matching)."""
+    if not extracted or not current:
+        return False
+    norm = lambda s: re.sub(r"[^A-Z0-9]", "", s.upper())
+    return norm(extracted) == norm(current)
+
+
+def _extract_bl_number(text):
+    """Local copy of document_classifier.extract_bl_number's regex - this script runs
+    as a separate subprocess with no import path to app.* (see _extract_lcl_fields_remote/
+    _compare_document_versions_remote above for how everything ELSE that needs
+    document_classifier.py's logic goes over HTTP instead), but a BL number is a pure
+    regex over subject text already sitting in job["subject"] - not worth a Flask
+    round-trip for. Keep this pattern in sync with the real definition if it ever
+    changes there."""
+    if not text:
+        return None
+    m = re.search(r"\bB\s*/\s*L\s*[:\s]\s*([A-Z0-9][A-Z0-9\-]{3,25})\b", text, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
+def _values_match_cfs(extracted, current):
+    """Same prefix-matching rule edit_preceding_customs_and_cfs itself already uses
+    to pick a Discharge CFS dropdown option from free text (first 3 letters, with a
+    "CTG Logistics" special case, see that function) - reused here to judge whether
+    the Edit tab's CURRENT dropdown label already corresponds to what the Arrival
+    Notice document says. A strict string compare would false-flag every match: the
+    Edit tab holds a dropdown LABEL (e.g. "CTG Logistics B.V."), the document gives
+    free text (e.g. "VLS BELGIUM" or "CTG")."""
+    if not extracted or not current:
+        return False
+    prefix = extracted[:3].upper() if len(extracted) >= 3 else extracted.upper()
+    if prefix == "CTG":
+        return "ctg logistics" in current.lower()
+    return current.upper().startswith(prefix)
+
+
+def _reupload_arrival_notice(page, job, file_bytes, file_mime, filename):
+    """Operator selected "No" during Arrival Notice verification (see
+    _verify_existing_arrival_notice) - verification is not accepted until the
+    Arrival Notice document is (re-)uploaded to the Documents tab, through the same
+    upload+confirm flow handle_arrival_notice already uses for a fresh Arrival
+    Notice. Returns True/False as handle_delivery_order expects (continue / stop -
+    job status is already set on failure)."""
+    if file_bytes is None:
+        set_job_status(job, "error", error="Could not download the existing Arrival Notice from Shypple to re-upload it.")
+        return False
+    if not _ensure_org_before_documents_tab(page, job):
+        return False
+    open_documents_tab(page)
+    fill_result = fill_shipment_document_form(page, "Arrival notice", file_bytes, file_mime, filename, [], None)
+    if not fill_result.get("success"):
+        set_job_status(job, "error", error=f"Could not prepare Arrival Notice re-upload: {fill_result.get('error')}")
+        return False
+
+    _open_confirmation_gate()
+    set_job_status(
+        job, "awaiting_lcl_submit_confirmation",
+        phase="Waiting for confirmation to submit the Arrival Notice document (re-verification)",
+        submit_preview={"filename": fill_result.get("filename"), "matched_type": fill_result.get("matched_type")},
+    )
+    log_job(job, "Re-uploading the Arrival Notice document for verification. Waiting for confirmation.")
+    if not _wait_for_confirmation(job):
+        set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
+        log_job(job, "Skipped by operator - Arrival Notice re-upload was NOT submitted.")
+        return False
+
+    set_job_status(job, "processing", phase="Submitting Arrival Notice document")
+    submit_result = submit_shipment_document_form(page)
+    if not submit_result.get("success"):
+        set_job_status(job, "upload_failed", error=submit_result.get("error"))
+        log_job(job, f"Failed to submit Arrival Notice re-upload: {submit_result.get('error')}")
+        return False
+
+    with STATE_LOCK:
+        job["arrival_notice_verified"] = True
+    log_job(job, "Arrival Notice document uploaded - verification complete.")
+    return True
+
+
+def _verify_existing_arrival_notice(page, job, arrival_row):
+    """An Arrival Notice document already exists on the shipment's Documents tab
+    (arrival_row, from _find_uploaded_row_for_type) - download it, extract Customs
+    Number / Discharge CFS from its content, compare against the Edit tab's CURRENT
+    values, and open a Yes/No confirmation gate for the operator (see
+    awaiting_arrival_notice_verification in dashboard.html). Yes corrects any
+    mismatched-and-extractable field from the Arrival Notice (source of truth); No
+    treats verification as incomplete and re-uploads the Arrival Notice document
+    instead (_reupload_arrival_notice). Returns True/False as handle_delivery_order
+    expects."""
+    set_job_status(job, "processing", phase="Downloading existing Arrival Notice for verification")
+    download_href = arrival_row.get("downloadHref")
+    if download_href:
+        file_bytes, file_mime = download_shypple_document_bytes(page, download_href)
+    else:
+        log_job(job, "Arrival Notice row on the Documents tab has no download link - "
+                     "cannot verify its content, falling back to manual verification.")
+        file_bytes, file_mime = None, None
+    extracted = _extract_lcl_fields_remote(file_bytes, file_mime, arrival_row.get("filename") or "") if file_bytes else {}
+
+    set_job_status(job, "processing", phase="Reading current Edit tab data")
+    current = check_edit_tab_customs_and_cfs(page)
+    # check_edit_tab_customs_and_cfs navigated to the shipment's /edit page to read
+    # these fields (no form submit) - return to the main shipment page before the
+    # gate below, so anything after a Yes/No decision (the correction write, or the
+    # re-upload's own Documents-tab open) starts from a known page state.
+    if job.get("shipment_path"):
+        _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
+
+    customs_match = _values_match_customs(extracted.get("customs_number"), current.get("customs_number"))
+    cfs_match = _values_match_cfs(extracted.get("cfs_address"), current.get("cfs_address"))
+    needs_manual = not extracted.get("customs_number") and not extracted.get("cfs_address")
+
+    check_result = {
+        "filename": arrival_row.get("filename"),
+        "extracted": extracted,
+        "current_edit_tab": current,
+        "customs_match": customs_match,
+        "cfs_match": cfs_match,
+        "needs_manual_verification": needs_manual,
+    }
+    with STATE_LOCK:
+        job["arrival_notice_check"] = check_result
+
+    _open_confirmation_gate()
+    set_job_status(job, "awaiting_arrival_notice_verification",
+                    phase="Waiting for confirmation - verify Arrival Notice data against Edit tab",
+                    arrival_notice_check=check_result)
+    log_job(job, f"Arrival Notice found on Documents tab ('{arrival_row.get('filename')}') - "
+                 f"customs_match={customs_match}, cfs_match={cfs_match}, needs_manual={needs_manual}. "
+                 "Waiting for confirmation.")
+
+    if not _wait_for_confirmation(job):
+        log_job(job, "Operator selected No - Arrival Notice not verified. Re-uploading the "
+                     "Arrival Notice document before continuing.")
+        return _reupload_arrival_notice(
+            page, job, file_bytes, file_mime, arrival_row.get("filename") or "Arrival Notice.pdf"
+        )
+
+    fixes = {}
+    if extracted.get("customs_number") and not customs_match:
+        fixes["customs_number"] = extracted["customs_number"]
+    if extracted.get("cfs_address") and not cfs_match:
+        fixes["cfs_address"] = extracted["cfs_address"]
+    if fixes:
+        set_job_status(job, "processing", phase="Correcting Edit tab from Arrival Notice data")
+        edit_preceding_customs_and_cfs(page, fixes.get("customs_number"), fixes.get("cfs_address"))
+        update_result = click_update_shipment(page)
+        if not update_result.get("success"):
+            set_job_status(job, "error", error=f"Could not save Arrival Notice correction: {update_result.get('error')}")
+            return False
+        log_job(job, f"Corrected Edit tab from Arrival Notice data: {fixes}")
+        if job.get("shipment_path"):
+            _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
+
+    with STATE_LOCK:
+        job["arrival_notice_verified"] = True
+    return True
+
+
+def _process_discovered_arrival_notice(page, job, found_mail):
+    """Build a synthetic job for an Arrival Notice mail discovered via BL-number
+    search (see verify_or_fetch_arrival_notice), insert it into the batch as its OWN
+    visible job right after the current one (so its confirmation gates render
+    normally in the dashboard, exactly like any queued job - see run_batch's
+    _inline_handled guard and dashboard.html's __activeBatchMessageIds fix), process
+    it end-to-end via the existing handle_arrival_notice UNCHANGED, then return to
+    this Delivery Order's own shipment page. Returns True/False as
+    handle_delivery_order expects - a skipped/failed sub-job does not abort the
+    parent Delivery Order (logged, not blocking), matching this pipeline's
+    never-block-unnecessarily philosophy."""
+    extracted = _extract_lcl_fields_remote(found_mail["bytes"], found_mail["mime"], found_mail.get("filename") or "")
+    sub_job = {
+        "message_id": found_mail["id"],
+        "subject": found_mail["subject"],
+        "mail_type": "arrival_notice",
+        "flow": "lcl_arrivals",
+        "extracted": extracted,
+        "status": "queued",
+        "log": [],
+        "parent_message_id": job.get("message_id"),
+        "_inline_handled": True,
+    }
+    with STATE_LOCK:
+        try:
+            idx = batch_state["jobs"].index(job)
+        except ValueError:
+            idx = len(batch_state["jobs"]) - 1
+        batch_state["jobs"].insert(idx + 1, sub_job)
+
+    log_job(job, f"Found Arrival Notice mail '{found_mail['subject']}' via BL-number search - "
+                 "processing it first (see the job listed right after this one).")
+
+    handle_arrival_notice(page, sub_job)
+
+    if sub_job.get("status") != "lcl_done":
+        log_job(job, f"Arrival Notice sub-process did not complete (status='{sub_job.get('status')}') - "
+                     "continuing this Delivery Order anyway, but customs/CFS data may still be unverified.")
+    else:
+        log_job(job, "Arrival Notice sub-process completed - returning to this Delivery Order.")
+
+    # handle_arrival_notice may have left the browser on a post-submit page - return
+    # to THIS job's own shipment page before continuing.
+    if job.get("shipment_path"):
+        _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
+    return True
+
+
+def verify_or_fetch_arrival_notice(page, job):
+    """New step run at the very start of handle_delivery_order, before its existing
+    Containers-tab check: make sure this shipment's Arrival Notice data (Customs
+    Number, Discharge CFS) is verified/correct before a Delivery Order goes out.
+
+    1. An Arrival Notice document is already on the shipment's Documents tab ->
+       _verify_existing_arrival_notice (download + extract + compare + Yes/No gate).
+    2. None uploaded yet, but a BL number can be pulled from this Delivery Order
+       mail's own subject and a Gmail search for it turns up an Arrival Notice mail
+       -> _process_discovered_arrival_notice (full nested processing, then return).
+    3. Neither applies -> continue the Delivery Order unchanged. Never hard-blocks a
+       Delivery Order just because no Arrival Notice could be found anywhere.
+
+    Returns True if handle_delivery_order should continue, False if it should stop
+    (the job's status is already set to something terminal)."""
+    set_job_status(job, "processing", phase="Checking Documents tab for an existing Arrival Notice")
+    if not _ensure_org_before_documents_tab(page, job):
+        return False
+    open_documents_tab(page)
+    doc_rows = scrape_document_rows(page)
+    arrival_row = _find_uploaded_row_for_type("Arrival notice", doc_rows)
+
+    if arrival_row:
+        return _verify_existing_arrival_notice(page, job, arrival_row)
+
+    bl_number = _extract_bl_number(job.get("subject", ""))
+    if not bl_number:
+        log_job(job, "No Arrival Notice on Shypple yet, and no BL number could be extracted "
+                     "from this Delivery Order mail's subject - continuing without verification.")
+        return True
+
+    log_job(job, f"No Arrival Notice on Shypple yet - searching the LCL inbox for BL number '{bl_number}'.")
+    matches = _search_bl_number_remote(bl_number)
+    found_mail = None
+    for m in matches:
+        if not m.get("hasAttachment"):
+            continue
+        # Confirm the match is actually an Arrival Notice mail by trying to fetch a
+        # document classified as such - the same check the rest of this pipeline
+        # already trusts, rather than adding new classification logic here.
+        test_bytes, test_mime, test_filename, _fetch_error = _fetch_email_document(
+            m["id"], "Arrival notice", subject=m.get("subject", ""), label=_LCL_LABEL_KEY,
+        )
+        if test_bytes is not None:
+            found_mail = {
+                "id": m["id"], "subject": m.get("subject", ""),
+                "bytes": test_bytes, "mime": test_mime, "filename": test_filename,
+            }
+            break
+
+    if not found_mail:
+        log_job(job, f"No Arrival Notice mail found for BL number '{bl_number}' either - "
+                     "continuing Delivery Order without verification.")
+        return True
+
+    return _process_discovered_arrival_notice(page, job, found_mail)
+
+
 def handle_delivery_order(page, job):
+    if not verify_or_fetch_arrival_notice(page, job):
+        return
+
     set_job_status(job, "processing", phase="Checking Containers tab")
     current = check_container_tab_data(page)
     with STATE_LOCK:
@@ -2829,6 +3157,14 @@ def run_batch(page, jobs, email, password):
         return
 
     for idx, job in enumerate(jobs):
+        # A job inserted mid-batch by _process_discovered_arrival_notice (a Delivery
+        # Order's Arrival Notice cross-verification, found via BL-number search) is
+        # already fully processed synchronously by the time this loop's own
+        # enumerate() reaches its position - without this guard it would be handed
+        # to process_lcl_arrival_job a second time, from scratch, re-searching the
+        # shipment and re-running whichever handler already just ran.
+        if job.get("_inline_handled"):
+            continue
         with STATE_LOCK:
             batch_state["current_index"] = idx
         try:

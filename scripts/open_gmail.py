@@ -1670,6 +1670,22 @@ class PlaywrightControlServer(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result).encode("utf-8"))
             return
 
+        if parsed.path == "/search_label":
+            search_query = query.get("query", [""])[0].strip()
+            target_lbl = query.get("label", [LCL_LABEL_KEY])[0].strip() or LCL_LABEL_KEY
+            print(f"[Server] Request to search label '{target_lbl}' for '{search_query}'")
+            req = ActionRequest("search_label", "", label_name=target_lbl, query=search_query)
+            request_queue.put(req)
+            fulfilled = req.event.wait(timeout=20)
+            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
         if parsed.path == "/get_body":
             print(f"[Server] Request to get body for message id: '{message_id}'")
             req = ActionRequest("get_body", message_id)
@@ -2023,6 +2039,111 @@ def do_scrape_emails(page, force_write=False, label=None, output_path=None):
         return []
 
 
+def search_lcl_label(page, query):
+    """On-demand search within the lcl-arrivals---release label for an arbitrary
+    string (used by the Delivery Order -> Arrival Notice cross-verification flow in
+    scripts/shypple_process.py to find an Arrival Notice mail by BL number when none
+    is uploaded to Shypple yet). Deliberately does NOT call do_scrape_emails - that
+    function unconditionally overwrites data/scraped_emails_lcl.json whenever it
+    finds rows, and this is meant to be a purely transient, read-only lookup with no
+    side effects on the periodic scrape's cache. ``page`` should be lcl_page_ref
+    (already pinned to this label) - the row-scrape JS below is intentionally a
+    lightweight, independent copy of do_scrape_emails' own (not a shared refactor of
+    it), so this new on-demand path can never regress the periodic scrape loop every
+    other feature in this app depends on.
+
+    Returns the same per-mail dict shape do_scrape_emails already produces (id/
+    subject/from/date/snippet/unread/starred/starColor/hasAttachment/
+    attachmentNames), so a match plugs directly into _fetch_email_document/
+    resolve_deep_classification downstream exactly like a normally-scraped mail.
+    Always restores ``page`` back to the LCL label's list view before returning,
+    matching how fetch_email_body/_restore_unread already clean up after a
+    search-URL detour."""
+    if page is None or page.is_closed() or not (query or "").strip():
+        return []
+    try:
+        base_url = get_label_url(LCL_LABEL_KEY).split("#", 1)[0]
+        search_query = f'label:{LCL_LABEL_KEY} "{query.strip()}"'
+        search_url = f"{base_url}#search/{quote(search_query)}"
+        page.goto(search_url)
+        page.wait_for_timeout(1500)
+
+        js_scrape = """() => {
+            const rows = Array.from(document.querySelectorAll('tr.zA'));
+            return rows.map(row => {
+                const senderEl = row.querySelector('span.yP, span.zF, td.yX, span.bA4');
+                const sender = senderEl ? senderEl.innerText.trim() : 'Unknown';
+                const subjectEl = row.querySelector('span.bog');
+                const subject = subjectEl ? subjectEl.innerText.trim() : 'No Subject';
+                const snippetEl = row.querySelector('span.y2');
+                let snippet = snippetEl ? snippetEl.innerText.trim() : '';
+                if (snippet.startsWith('- ') || snippet.startsWith('— ')) snippet = snippet.slice(2).trim();
+                const dateEl = row.querySelector('td.xW span');
+                const date = dateEl ? dateEl.innerText.trim() : '';
+                const isUnread = row.classList.contains('zE');
+                const idEl = row.querySelector('[data-legacy-last-message-id]');
+                const legacyId = idEl ? idEl.getAttribute('data-legacy-last-message-id') : null;
+                const names = [];
+                const children = Array.from(row.querySelectorAll('*'));
+                for (const c of children) {
+                    const txt = (
+                        c.getAttribute('title') ||
+                        c.getAttribute('data-tooltip') ||
+                        c.getAttribute('aria-label') ||
+                        (c.children.length === 0 ? c.innerText : '') || ''
+                    ).trim();
+                    if (txt && /\\.(pdf|docx?|xlsx?|png|jpe?g|txt|zip|rar|csv)\\b/i.test(txt)) {
+                        if (!names.includes(txt) && txt.length < 150) names.push(txt);
+                    }
+                }
+                const hasAtt = names.length > 0 || !!row.querySelector('img.yE[title="Has attachment"], img.yE[alt="Has attachment"]');
+                return {
+                    legacyId, sender, subject, snippet, date, unread: isUnread,
+                    hasAttachment: hasAtt, attachmentNames: names
+                };
+            });
+        }"""
+        raw_rows = page.evaluate(js_scrape)
+
+        results = []
+        for item in (raw_rows or []):
+            legacy_id = item.get("legacyId")
+            if legacy_id:
+                email_id = f"pw_{legacy_id}"
+            else:
+                unique_str = f"{item['sender']}-{item['subject']}-{item['date']}"
+                email_id = f"pw_{hashlib.md5(unique_str.encode('utf-8')).hexdigest()}"
+            results.append({
+                "id": email_id,
+                "subject": item["subject"],
+                "from": item["sender"],
+                "date": item["date"],
+                "snippet": item["snippet"],
+                "unread": item["unread"],
+                "hasAttachment": item["hasAttachment"],
+                "attachmentNames": item["attachmentNames"],
+                "label": LCL_LABEL_KEY,
+            })
+
+        # Register any new ids so a subsequent per-message action (fetch document,
+        # star, mark read) routes to lcl_page_ref via _resolve_action_page, not the
+        # CMR tab - same thread-safe pattern do_scrape_emails already uses.
+        if results:
+            with _lcl_message_ids_lock:
+                _lcl_message_ids.update(r["id"] for r in results)
+
+        print(f"[Search] Found {len(results)} mail(s) in '{LCL_LABEL_KEY}' matching '{query}'")
+        return results
+    except Exception as e:
+        print(f"[Search] Error in search_lcl_label: {e}")
+        return []
+    finally:
+        try:
+            page.goto(_list_view_url_for(page))
+        except Exception:
+            pass
+
+
 def start_http_server():
     server = HTTPServer(("127.0.0.1", 40005), PlaywrightControlServer)
     print("Playwright control server running on http://127.0.0.1:40005")
@@ -2216,6 +2337,16 @@ def main():
                                 req.result = {"success": True, "label": active_label, "count": len(scraped_list), "url": gmail_page_ref.url}
                             elif req.action == "label_pending_relabel":
                                 req.result = label_pending_relabel(_ensure_release_orders_page(context))
+                            elif req.action == "search_label":
+                                # Only the lcl-arrivals---release label has a dedicated
+                                # standing tab (lcl_page_ref) to search from without
+                                # disturbing gmail_page_ref's own current view - this
+                                # action is only meaningful for that label today.
+                                if getattr(req, "label_name", "") == LCL_LABEL_KEY and lcl_page_ref and not lcl_page_ref.is_closed():
+                                    results = search_lcl_label(lcl_page_ref, getattr(req, "query", ""))
+                                    req.result = {"success": True, "results": results}
+                                else:
+                                    req.result = {"success": False, "error": f"No dedicated tab available to search label '{getattr(req, 'label_name', '')}'."}
                             else:
                                 # Catch-all: toggle_star, mark_read, mark_unread, archive,
                                 # delete - exactly the actions

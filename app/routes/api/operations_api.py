@@ -15,7 +15,7 @@ from flask import Blueprint, jsonify, request, current_app, send_file, send_from
 
 from app.services.parsing.document_classifier import (
     resolve_deep_classification, fetch_document_bytes, compare_document_versions, DOCUMENT_TYPES,
-    _load_cache, classify_email_meta, extract_sf_number,
+    _load_cache, classify_email_meta, extract_sf_number, extract_lcl_fields_from_bytes,
 )
 from app.utils.system_paths import get_downloads_dir
 
@@ -1043,3 +1043,29 @@ def operations_compare_document():
 
     result = compare_document_versions(email_bytes, email_mime, other_bytes, other_mime, doc_type)
     return jsonify({"success": True, **result})
+
+
+@operations_api_bp.route("/operations/extract_lcl_fields_from_bytes", methods=["POST"])
+def operations_extract_lcl_fields_from_bytes():
+    """Run the LCL field-extraction pipeline (regex over the PDF text layer, cross-
+    checked against a Gemini multimodal read - see
+    document_classifier.extract_lcl_fields_from_bytes) directly against a document's
+    raw bytes the caller already has - no message_id involved. Used by the Delivery
+    Order -> Arrival Notice cross-verification flow (scripts/shypple_process.py) for
+    a document already downloaded from Shypple's own Documents tab, mirroring how
+    /operations/compare_document takes an already-downloaded file's bytes rather than
+    fetching them itself."""
+    data = request.get_json(silent=True) or {}
+    file_b64 = data.get("file_base64", "")
+    mime = data.get("mime", "") or "application/pdf"
+    filename = data.get("filename", "")
+    if not file_b64:
+        return jsonify({"success": False, "error": "file_base64 is required."}), 400
+
+    try:
+        file_bytes = base64.b64decode(file_b64)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Could not decode file_base64: {e}"}), 400
+
+    extracted = extract_lcl_fields_from_bytes(file_bytes, mime, filename)
+    return jsonify({"success": True, "extracted": extracted})

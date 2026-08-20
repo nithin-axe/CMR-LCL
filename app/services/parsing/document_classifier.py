@@ -1716,6 +1716,18 @@ def extract_sf_number(text):
     return m.group(0).upper() if m else None
 
 
+def extract_bl_number(text):
+    """Extract a Bill of Lading number like "GZLN26060007" from a "B/L:" token in
+    email subject/body text (e.g. "...126102397-07 B/L:AMIGL260251083A...",
+    "...B/L:CPWSIN-2606788..."). Used by the Delivery Order -> Arrival Notice
+    cross-verification flow to find this shipment's Arrival Notice mail when none is
+    found via SF number / container number."""
+    if not text:
+        return None
+    m = re.search(r"\bB\s*/\s*L\s*[:\s]\s*([A-Z0-9][A-Z0-9\-]{3,25})\b", text, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
 def _normalize_date_str(raw):
     """Turn a raw date substring (YYYY-MM-DD, DD-MM-YYYY / DD/MM/YYYY / DD.MM.YYYY, DD Mon YYYY, or DD/MM) into
     YYYY-MM-DD. Returns None if raw doesn't look like these shapes."""
@@ -1964,6 +1976,38 @@ def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename):
     except Exception as e:
         _log_warn(f"LCL field LLM read failed for '{filename}': {e}")
         return {}
+
+
+def extract_lcl_fields_from_bytes(data_bytes, mime, filename=""):
+    """Run the same regex-then-LLM-cross-check extraction pipeline
+    lcl_arrivals_process (app/routes/api/operations_api.py) already uses for an
+    email's own attachment, but directly against arbitrary document bytes with no
+    message_id involved - for the Delivery Order -> Arrival Notice cross-verification
+    flow, which downloads a document already sitting on Shypple's own Documents tab,
+    not one freshly fetched from an email. Deliberately NOT wired into
+    lcl_arrivals_process itself (that code path is already battle-tested via many
+    real-document bug fixes - this is a separate, independent caller of the same
+    underlying primitives, not a refactor of it).
+
+    Same merge rule as that inline logic: the regex pass over the PDF's text layer
+    runs first; wherever we have the real bytes, Gemini's page-aware multimodal read
+    is also consulted and WINS whenever it disagrees with a non-empty regex value
+    (proximity-based regex matching can silently grab a wrong-but-present neighboring
+    cell's value out of a flattened 2-column table - see extract_lcl_arrival_data's
+    own history); an empty LLM answer never overrides a real regex value (LLM
+    silence isn't evidence the regex was wrong)."""
+    page_texts = _extract_pdf_page_texts(data_bytes) if data_bytes else []
+    extracted = extract_lcl_arrival_data("\n".join(page_texts))
+    if data_bytes:
+        llm_fields = extract_lcl_fields_via_llm(GeminiClient(), data_bytes, mime, filename)
+        for k in ("container_number", "devanning_date", "customs_number", "cfs_address"):
+            llm_val = llm_fields.get(k)
+            if not llm_val:
+                continue
+            regex_val = extracted.get(k)
+            if not regex_val or str(regex_val).strip().casefold() != str(llm_val).strip().casefold():
+                extracted[k] = llm_val
+    return extracted
 
 
 _LCL_STATUSUPDATE_RE = re.compile(r"status\s*update|\bopzetten\b|\blossen\b", re.IGNORECASE)
