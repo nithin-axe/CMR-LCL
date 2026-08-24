@@ -109,6 +109,84 @@
         font-weight: 500;
     }
 
+    /* Auto-Refresh Countdown Badge */
+    .refresh-countdown-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        border-radius: 20px;
+        background: rgba(99, 102, 241, 0.08);
+        border: 1px solid rgba(99, 102, 241, 0.22);
+        color: #4f46e5;
+        font-size: 0.82rem;
+        font-weight: 500;
+        cursor: pointer;
+        user-select: none;
+        transition: all 0.2s ease;
+        margin-left: 4px;
+        margin-right: 4px;
+    }
+
+    .refresh-countdown-badge:hover {
+        background: rgba(99, 102, 241, 0.15);
+        border-color: rgba(99, 102, 241, 0.4);
+        box-shadow: 0 2px 6px rgba(99, 102, 241, 0.15);
+        transform: translateY(-1px);
+    }
+
+    .timer-icon-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.85rem;
+        color: #4f46e5;
+    }
+
+    .timer-label {
+        color: #4b5563;
+        font-weight: 500;
+    }
+
+    .timer-value {
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+        font-weight: 700;
+        font-size: 0.88rem;
+        color: #4f46e5;
+        min-width: 22px;
+        text-align: center;
+    }
+
+    .timer-pause-btn {
+        background: transparent;
+        border: none;
+        color: #9ca3af;
+        cursor: pointer;
+        padding: 2px 4px;
+        border-radius: 4px;
+        font-size: 0.72rem;
+        display: flex;
+        align-items: center;
+        transition: color 0.15s ease, background 0.15s ease;
+        margin-left: 2px;
+    }
+
+    .timer-pause-btn:hover {
+        color: #4f46e5;
+        background: rgba(99, 102, 241, 0.12);
+    }
+
+    .refresh-countdown-badge.paused {
+        background: rgba(156, 163, 175, 0.12);
+        border-color: rgba(156, 163, 175, 0.3);
+        color: #6b7280;
+    }
+    .refresh-countdown-badge.paused .timer-value,
+    .refresh-countdown-badge.paused .timer-icon-wrap,
+    .refresh-countdown-badge.paused .timer-label {
+        color: #6b7280;
+    }
+
     .gmail-action-btn {
         background: transparent;
         border: none;
@@ -1201,9 +1279,20 @@
                     <button class="gmail-action-btn" onclick="fetchEmailsLive(true)" title="Fetch Live Mails">
                         <i class="fa-solid fa-rotate-right"></i>
                     </button>
-                    <button class="btn btn-secondary" onclick="fetchEmailsLive(true)" style="padding: 6px 14px; font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">
+                    <button class="btn btn-secondary" onclick="manualRefreshWithTimer()" style="padding: 6px 14px; font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">
                         <i class="fa-solid fa-arrows-rotate"></i> Update Live
                     </button>
+                    <div id="refresh-timer-widget" class="refresh-countdown-badge" title="Auto-refresh countdown to check for new files & emails. Click to refresh now." onclick="manualRefreshWithTimer()">
+                        <div class="timer-icon-wrap">
+                            <i class="fa-solid fa-clock" id="timer-clock-icon"></i>
+                            <i class="fa-solid fa-rotate fa-spin" id="timer-spinner-icon" style="display: none;"></i>
+                        </div>
+                        <span class="timer-label">Auto-refresh:</span>
+                        <span class="timer-value" id="refresh-timer-countdown">10s</span>
+                        <button id="timer-pause-btn" class="timer-pause-btn" onclick="event.stopPropagation(); toggleTimerPause();" title="Pause / Resume Auto-Refresh">
+                            <i class="fa-solid fa-pause" id="timer-pause-icon"></i>
+                        </button>
+                    </div>
                     <button class="gmail-action-btn" title="More">
                         <i class="fa-solid fa-ellipsis-vertical"></i>
                     </button>
@@ -1584,10 +1673,27 @@
     // a page reload that resumes an already-running batch (see the /operations/status
     // check near the bottom of this script) still targets the right panel.
     window.__activeProcessFlow = "{{ 'lcl' if selected_label == 'lcl-arrivals---release' else 'cmr' }}";
-    function _opPanelId() { return window.__activeProcessFlow === "lcl" ? "process-panel-lcl" : "process-panel"; }
-    function _opEmptyStateId() { return window.__activeProcessFlow === "lcl" ? "process-empty-state-lcl" : "process-empty-state"; }
-    function _opBannerId() { return window.__activeProcessFlow === "lcl" ? "operations-banner-lcl" : "operations-banner"; }
-    function _opBlockedBannerId() { return window.__activeProcessFlow === "lcl" ? "operations-blocked-banner-lcl" : "operations-blocked-banner"; }
+    // CMR and LCL each drive their own independent Shypple browser/batch now (see
+    // scripts/shypple_process.py's --role) - these three globals used to be single
+    // values shared by whichever flow was "active"; keyed by flow now so a batch
+    // starting on one pipeline can never clobber the other's in-progress polling,
+    // panel-filtering, or blocked-banner state.
+    window.__operationsPollTimers = window.__operationsPollTimers || { cmr: null, lcl: null };
+    window.__activeBatchMessageIds = window.__activeBatchMessageIds || { cmr: null, lcl: null };
+    window.__operationsStartBlocked = window.__operationsStartBlocked || { cmr: null, lcl: null };
+    // Each takes an optional explicit `flow` ("cmr"/"lcl"), defaulting to
+    // window.__activeProcessFlow - one-off call sites (review rendering, the confirm
+    // click) can rely on the default since they only ever run in the context of
+    // whichever tab the user is actively on. The recurring poll/render/gate chain
+    // (startOperationsPolling/pollOperationsStatus/renderOperationsPanel/
+    // renderBlockedBanner/proceedOperations/skipOperations) always passes flow
+    // explicitly instead, since CMR and LCL now run as two independent Shypple
+    // browsers/batches and a background pipeline's panel must keep updating
+    // correctly even while the user is looking at the other tab.
+    function _opPanelId(flow) { return (flow || window.__activeProcessFlow) === "lcl" ? "process-panel-lcl" : "process-panel"; }
+    function _opEmptyStateId(flow) { return (flow || window.__activeProcessFlow) === "lcl" ? "process-empty-state-lcl" : "process-empty-state"; }
+    function _opBannerId(flow) { return (flow || window.__activeProcessFlow) === "lcl" ? "operations-banner-lcl" : "operations-banner"; }
+    function _opBlockedBannerId(flow) { return (flow || window.__activeProcessFlow) === "lcl" ? "operations-blocked-banner-lcl" : "operations-blocked-banner"; }
 
     // ----- Toast notifications + custom confirm (see the HTML comment above these
     // elements for why: native alert()/confirm() are silently unusable here). -----
@@ -1675,7 +1781,13 @@
 
         // Show the current tab, and add an "active" class to the button that opened the tab
         document.getElementById(tabId).classList.add("active");
-        evt.currentTarget.classList.add("active");
+        if (evt && evt.currentTarget) evt.currentTarget.classList.add("active");
+
+        if (tabId === "cmr-process-tab") {
+            autoLaunchShyppleBrowser("cmr");
+        } else if (tabId === "lcl-process-tab") {
+            autoLaunchShyppleBrowser("lcl");
+        }
     }
 
     // Same tab switch, callable without a real click event (e.g. from processSelectedMails()).
@@ -1687,6 +1799,12 @@
         document.querySelectorAll(".tab-btn").forEach(btn => {
             if ((btn.getAttribute("onclick") || "").includes(`'${tabId}'`)) btn.classList.add("active");
         });
+
+        if (tabId === "cmr-process-tab") {
+            autoLaunchShyppleBrowser("cmr");
+        } else if (tabId === "lcl-process-tab") {
+            autoLaunchShyppleBrowser("lcl");
+        }
     }
 
     // ----- Multi-select checkboxes -> "Process" (Operations Process automation) -----
@@ -1752,10 +1870,10 @@
         // data - this is what made a fresh selection appear to show "the mail I ran the
         // previous time." Stopping any leftover timer immediately (not just gating the
         // render) also means no stray tick is even scheduled to race this.
-        window.__reviewPending = true;
-        if (window.__operationsPollTimer) { clearInterval(window.__operationsPollTimer); window.__operationsPollTimer = null; }
+        window.__reviewPending = "cmr";
+        if (window.__operationsPollTimers.cmr) { clearInterval(window.__operationsPollTimers.cmr); window.__operationsPollTimers.cmr = null; }
 
-        window.__activeBatchMessageIds = new Set(ids);
+        window.__activeBatchMessageIds.cmr = new Set(ids);
         window.__longActionInFlight = true;
         window.__activeProcessFlow = "cmr";
         const btn = document.getElementById("process-selected-btn");
@@ -1772,13 +1890,13 @@
             .then(res => res.json())
             .then(data => {
                 if (!data.success) {
-                    window.__reviewPending = false;
+                    window.__reviewPending = null;
                     renderOperationsError(data.error || "Failed to read the selected email(s).");
                     return;
                 }
                 renderOperationsReview(data.jobs, data.errors || []);
             })
-            .catch(err => { window.__reviewPending = false; renderOperationsError("Error: " + err); })
+            .catch(err => { window.__reviewPending = null; renderOperationsError("Error: " + err); })
             .finally(() => { window.__longActionInFlight = false; if (btn) btn.disabled = window.selectedMailIds.size === 0; });
     }
 
@@ -1954,7 +2072,7 @@
     }
 
     function cancelOperationsReview() {
-        window.__reviewPending = false;
+        window.__reviewPending = null;
         window.__pendingOperationsJobs = [];
         const panel = document.getElementById(_opPanelId());
         const emptyState = document.getElementById(_opEmptyStateId());
@@ -1981,9 +2099,9 @@
         const ids = Array.from(window.selectedMailIds);
         if (!ids.length) return;
 
-        window.__reviewPending = true;
-        if (window.__operationsPollTimer) { clearInterval(window.__operationsPollTimer); window.__operationsPollTimer = null; }
-        window.__activeBatchMessageIds = new Set(ids);
+        window.__reviewPending = "lcl";
+        if (window.__operationsPollTimers.lcl) { clearInterval(window.__operationsPollTimers.lcl); window.__operationsPollTimers.lcl = null; }
+        window.__activeBatchMessageIds.lcl = new Set(ids);
         window.__longActionInFlight = true;
         window.__activeProcessFlow = "lcl";
         const btn = document.getElementById("process-selected-btn");
@@ -2000,13 +2118,13 @@
             .then(res => res.json())
             .then(data => {
                 if (!data.success) {
-                    window.__reviewPending = false;
+                    window.__reviewPending = null;
                     renderOperationsError(data.error || "Failed to read the selected email(s).");
                     return;
                 }
                 renderLclOperationsReview(data.items || []);
             })
-            .catch(err => { window.__reviewPending = false; renderOperationsError("Error: " + err); })
+            .catch(err => { window.__reviewPending = null; renderOperationsError("Error: " + err); })
             .finally(() => { window.__longActionInFlight = false; if (btn) btn.disabled = window.selectedMailIds.size === 0; });
     }
 
@@ -2046,7 +2164,13 @@
         const pendingRows = pendingItems.map((item) => {
             const itemIndex = items.indexOf(item);
             const ex = item.extracted || {};
-            const fields = [["container_number", "Container #"], ["devanning_date", "Devanning / Available Date"]];
+            // Delivery Order's own document is never the source for these fields -
+            // container/devanning date come from Shypple's Containers tab, customs
+            // number/CFS from the shipment's existing Arrival Notice document, both
+            // checked live once Shypple opens (see verify_or_fetch_arrival_notice /
+            // handle_delivery_order) - nothing was extracted here to show or override.
+            const fields = item.mail_type === "delivery_order" ? [] :
+                [["container_number", "Container #"], ["devanning_date", "Devanning / Available Date"]];
             if (item.mail_type === "arrival_notice") {
                 fields.push(["customs_number", "Customs Number"], ["cfs_address", "CFS / Warehouse"]);
             }
@@ -2063,6 +2187,14 @@
                 </span>`;
             }).join(" ");
 
+            const extractedLine = item.mail_type === "delivery_order"
+                ? `<div class="process-review-line" style="margin-top:8px; color:var(--text-muted);">`
+                    + `<i class="fa-solid fa-circle-info"></i> Container number and devanning date will be checked `
+                    + `against Shypple's Containers tab; customs number and CFS/warehouse will be checked against `
+                    + `the shipment's existing Arrival Notice document. You'll confirm these live in Shypple before `
+                    + `the Delivery order is uploaded.</div>`
+                : `<div class="process-review-line" style="margin-top:8px;"><b>Extracted data (edit if wrong before opening Shypple):</b><br/>${fieldInputs}</div>`;
+
             return `
                 <div class="process-job-row">
                     <div class="process-job-main">
@@ -2070,7 +2202,7 @@
                         ${typeBadge(item)}
                     </div>
                     <div class="process-review-line"><b>SF Number:</b> ${escapeHtml(item.sf_number || "(not found - required to locate the shipment)")}</div>
-                    <div class="process-review-line" style="margin-top:8px;"><b>Extracted data (edit if wrong before opening Shypple):</b><br/>${fieldInputs}</div>
+                    ${extractedLine}
                 </div>`;
         }).join("");
 
@@ -2118,12 +2250,16 @@
     function confirmAndStartOperations() {
         const jobs = window.__pendingOperationsJobs || [];
         if (!jobs.length) return;
+        // Captured now, not re-read later - this batch belongs to whichever flow was
+        // active when the user confirmed it, even if they switch tabs before the
+        // /api/operations/start response lands.
+        const flow = window.__activeProcessFlow;
 
         // Review is over (confirmed) - let pollOperationsStatus resume driving
         // process-panel/operations-banner from here on.
-        window.__reviewPending = false;
+        window.__reviewPending = null;
         window.__longActionInFlight = true;
-        const panel = document.getElementById(_opPanelId());
+        const panel = document.getElementById(_opPanelId(flow));
         if (panel) {
             panel.innerHTML = `<div class="process-summary"><i class="fa-solid fa-spinner fa-spin"></i> `
                 + `Opening the Shypple browser (if not already open) and starting verification - `
@@ -2138,16 +2274,16 @@
             .then(res => res.json())
             .then(data => {
                 if (data.success) {
-                    window.__activeBatchMessageIds = new Set(jobs.map(j => j.message_id));
+                    window.__activeBatchMessageIds[flow] = new Set(jobs.map(j => j.message_id));
                     window.__pendingOperationsJobs = [];
-                    window.__operationsStartBlocked = null;
+                    window.__operationsStartBlocked[flow] = null;
                 } else {
                     // This selection did NOT become the active batch - it was rejected
                     // outright. Drop the optimistic filter set from processSelectedMails()
                     // (step 1) so the panel below shows the REAL running batch's jobs
                     // instead of filtering them out because their ids don't match this
                     // never-started selection - see renderOperationsPanel's fallback too.
-                    window.__activeBatchMessageIds = null;
+                    window.__activeBatchMessageIds[flow] = null;
                     // The batch server (POST /run_batch) flatly rejects with 409 when a
                     // previous batch is still running/awaiting confirmation - this
                     // selection was NOT queued anywhere, it's simply dropped. Silently
@@ -2158,14 +2294,14 @@
                     // record" even though nothing actually mismatched. Keep the
                     // pending jobs (nothing lost) and surface this distinctly so the
                     // status below is never mistaken for the new selection.
-                    window.__operationsStartBlocked = {
+                    window.__operationsStartBlocked[flow] = {
                         error: data.error || "Could not start.",
                         subjects: jobs.map(j => j.subject || j.message_id).join(", "),
                     };
                 }
                 // Either way, defer to the REAL server status rather than trusting/
                 // discarding based on this response alone.
-                startOperationsPolling();
+                startOperationsPolling(flow);
             })
             .catch(err => { window.__longActionInFlight = false; renderOperationsError("Error: " + err); });
     }
@@ -2180,13 +2316,13 @@
         "awaiting_org_switch_confirmation",
         "awaiting_lcl_container_confirmation", "awaiting_lcl_submit_confirmation",
         "awaiting_lcl_delivery_confirmation", "awaiting_lcl_date_confirmation",
-        "awaiting_arrival_notice_verification",
+        "awaiting_arrival_notice_verification", "awaiting_lcl_document_diff_confirmation",
     ];
 
-    function renderBlockedBanner(state) {
-        const el = document.getElementById(_opBlockedBannerId());
+    function renderBlockedBanner(state, flow) {
+        const el = document.getElementById(_opBlockedBannerId(flow));
         if (!el) return;
-        const blocked = window.__operationsStartBlocked;
+        const blocked = window.__operationsStartBlocked[flow || window.__activeProcessFlow];
         if (blocked && state && state.running) {
             el.innerHTML = `
                 <div class="process-banner process-banner-error">
@@ -2201,7 +2337,7 @@
                 <div class="process-banner process-banner-warn">
                     <i class="fa-solid fa-circle-info"></i>
                     <span class="process-banner-text">The earlier batch has finished. Your selection (${escapeHtml(blocked.subjects)}) is still waiting to be started.</span>
-                    <button class="btn" style="width:auto; padding:6px 16px;" onclick="retryBlockedOperations()">Retry now</button>
+                    <button class="btn" style="width:auto; padding:6px 16px;" onclick="retryBlockedOperations('${flow || window.__activeProcessFlow}')">Retry now</button>
                 </div>`;
             return;
         }
@@ -2222,66 +2358,102 @@
                 </div>` : "";
     }
 
-    function retryBlockedOperations() {
-        window.__operationsStartBlocked = null;
-        const el = document.getElementById(_opBlockedBannerId());
+    function retryBlockedOperations(flow) {
+        const f = flow || window.__activeProcessFlow;
+        window.__operationsStartBlocked[f] = null;
+        const el = document.getElementById(_opBlockedBannerId(f));
         if (el) el.innerHTML = "";
         confirmAndStartOperations();
     }
 
     // ----- Operations Process status panel (polls the Flask proxy -> Shypple control server) -----
-    window.__operationsPollTimer = window.__operationsPollTimer || null;
+    // Two independent timers - one per pipeline - so both panels keep showing live
+    // progress regardless of which tab is currently active (window.__operationsPollTimers
+    // is initialized once, near window.__activeProcessFlow, above).
 
-    function startOperationsPolling() {
-        if (window.__operationsPollTimer) clearInterval(window.__operationsPollTimer);
-        pollOperationsStatus();
-        window.__operationsPollTimer = setInterval(pollOperationsStatus, 2000);
+    function startOperationsPolling(flow) {
+        const f = flow || window.__activeProcessFlow;
+        if (window.__operationsPollTimers[f]) clearInterval(window.__operationsPollTimers[f]);
+        pollOperationsStatus(f);
+        window.__operationsPollTimers[f] = setInterval(() => pollOperationsStatus(f), 2000);
     }
 
-    function pollOperationsStatus() {
-        // A review (containers/doc types, pre-Shypple) is currently showing - it owns
-        // process-panel/operations-banner until the user confirms or cancels it, see
-        // processSelectedMails. Don't let a status tick overwrite it with the previous
-        // batch's (possibly stale) jobs in the meantime.
-        if (window.__reviewPending) return;
-        fetch("/api/operations/status")
+    function pollOperationsStatus(flow) {
+        const f = flow || window.__activeProcessFlow;
+        // A review (containers/doc types, pre-Shypple) is currently showing for THIS
+        // flow - it owns that flow's process-panel/operations-banner until the user
+        // confirms or cancels it, see processSelectedMails/processLclSelectedMails.
+        // Don't let a status tick overwrite it with the previous batch's (possibly
+        // stale) jobs in the meantime. Only one flow can be under review at a time,
+        // so this doesn't block the OTHER flow's independent polling.
+        if (window.__reviewPending === f) return;
+        fetch(`/api/operations/status?role=${f}`)
             .then(res => res.json())
             .then(data => {
                 if (!data.success) {
                     window.__longActionInFlight = false;
-                    renderBlockedBanner(null);
-                    renderOperationsError(data.error || "The Shypple automation browser is not running.");
+                    renderBlockedBanner(null, f);
+                    renderOperationsError(data.error || "The Shypple automation browser is not running.", f);
                     return;
                 }
-                renderBlockedBanner(data.state);
-                renderOperationsPanel(data.state);
-                if (!data.state.running && window.__operationsPollTimer) {
+                renderBlockedBanner(data.state, f);
+                renderOperationsPanel(data.state, f);
+                if (!data.state.running && window.__operationsPollTimers[f]) {
                     window.__longActionInFlight = false;
-                    clearInterval(window.__operationsPollTimer);
-                    window.__operationsPollTimer = null;
+                    clearInterval(window.__operationsPollTimers[f]);
+                    window.__operationsPollTimers[f] = null;
                 }
             })
-            .catch(err => renderOperationsError("Error: " + err));
+            .catch(err => renderOperationsError("Error: " + err, f));
     }
 
-    function launchOperationsBrowser(btnEl) {
-        const btn = btnEl || document.getElementById("launch-operations-btn-cmr") || document.getElementById("launch-operations-btn-lcl");
-        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Launching...'; }
-        fetch("/api/operations/launch", { method: "POST" })
+    window.__autoLaunchingShypple = window.__autoLaunchingShypple || { cmr: false, lcl: false };
+
+    function autoLaunchShyppleBrowser(targetRole) {
+        const r = targetRole || window.__activeProcessFlow || "cmr";
+        if (window.__autoLaunchingShypple[r]) return;
+        window.__autoLaunchingShypple[r] = true;
+
+        const banner = document.getElementById(_opBannerId(r));
+        if (banner) {
+            banner.innerHTML = `
+                <div class="process-banner" style="display: flex; align-items: center; gap: 10px; background: rgba(99, 102, 241, 0.1); border: 1px solid rgba(99, 102, 241, 0.3); color: var(--accent-indigo, #4f46e5); padding: 12px 16px; border-radius: 8px; font-size: 0.9rem;">
+                    <i class="fa-solid fa-spinner fa-spin"></i>
+                    <span>Shypple browser is not open - automatically opening Shypple site now...</span>
+                </div>`;
+        }
+        launchOperationsBrowser(null, r);
+    }
+
+    function launchOperationsBrowser(btnEl, targetRole) {
+        const role = targetRole
+            || (btnEl && btnEl.dataset && btnEl.dataset.role)
+            || (btnEl && btnEl.id === "launch-operations-btn-lcl" ? "lcl" : null)
+            || window.__activeProcessFlow
+            || "cmr";
+        const btn = btnEl || document.getElementById(`launch-operations-btn-${role}`);
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Opening Shypple...'; }
+        window.__autoLaunchingShypple[role] = true;
+
+        fetch("/api/operations/launch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ role })
+        })
             .then(res => res.json())
             .then(data => {
                 if (data.success) {
                     showToast("Shypple automation browser is ready.");
+                    startOperationsPolling(role);
                 } else {
                     showToast(data.error || "Failed to launch the Shypple automation browser.", true);
                 }
             })
             .catch(err => showToast("Error: " + err, true))
-            // Reset when the request ACTUALLY finishes (launch can take up to 45s on a
-            // cold start), not on a fixed timer - the previous 2000ms setTimeout reset
-            // the button back to idle while the launch was often still in progress in
-            // the background, making the click look like it did nothing.
-            .finally(() => { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-play"></i> Launch Shypple browser'; } });
+            .finally(() => {
+                window.__autoLaunchingShypple[role] = false;
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-play"></i> Open Shypple browser'; }
+            });
     }
 
     // Catch-up for the a-release-orders label in the nl.importsea@shypple.com mailbox:
@@ -2334,24 +2506,26 @@
             .finally(() => { window.__longActionInFlight = false; if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-tag"></i> Label pending release-orders'; } });
     }
 
-    function proceedOperations() {
-        fetch("/api/operations/proceed", { method: "POST" })
+    function proceedOperations(flow) {
+        const f = flow || window.__activeProcessFlow;
+        fetch(`/api/operations/proceed?role=${f}`, { method: "POST" })
             .then(res => res.json())
             .then(data => {
                 if (!data.success) showToast(data.error || "Nothing is currently paused.", true);
-                else pollOperationsStatus();
+                else pollOperationsStatus(f);
             })
             .catch(err => showToast("Error: " + err, true));
     }
 
-    async function skipOperations() {
+    async function skipOperations(flow) {
+        const f = flow || window.__activeProcessFlow;
         const ok = await confirmDialog("Skip this email? Its pending action will NOT be performed, and it will be left as-is (no star/read change) so you can reprocess it later.");
         if (!ok) return;
-        fetch("/api/operations/skip", { method: "POST" })
+        fetch(`/api/operations/skip?role=${f}`, { method: "POST" })
             .then(res => res.json())
             .then(data => {
                 if (!data.success) showToast(data.error || "Nothing is currently paused.", true);
-                else pollOperationsStatus();
+                else pollOperationsStatus(f);
             })
             .catch(err => showToast("Error: " + err, true));
     }
@@ -2380,7 +2554,11 @@
         awaiting_lcl_delivery_confirmation: "Awaiting confirmation - verify Containers/Edit tab data",
         awaiting_lcl_date_confirmation: "Awaiting confirmation to update devanning date",
         awaiting_arrival_notice_verification: "Awaiting confirmation - verify Arrival Notice vs Edit tab",
-        lcl_done: "Done - read + yellow starred",
+        awaiting_lcl_document_diff_confirmation: "Existing document differs - awaiting your confirmation",
+        // "read + yellow starred" when nothing needed uploading (already identical),
+        // "unread + yellow starred" when a document was actually uploaded - see the
+        // per-job detail line (job.read_action) for which one actually happened.
+        lcl_done: "Done - yellow starred",
         skipped_cluster_or_fcl: "Skipped - Cluster 3 or FCL",
         flagged_my_jewellery: "Flagged - My Jewellery customer",
         lcl_incomplete_container: "Container tab incomplete - process Arrival Notice first",
@@ -2398,35 +2576,51 @@
             || status === "skipped_by_operator"
             || status === "awaiting_lcl_container_confirmation" || status === "awaiting_lcl_submit_confirmation"
             || status === "awaiting_lcl_delivery_confirmation" || status === "awaiting_lcl_date_confirmation"
-            || status === "awaiting_arrival_notice_verification"
+            || status === "awaiting_arrival_notice_verification" || status === "awaiting_lcl_document_diff_confirmation"
             || status === "skipped_cluster_or_fcl" || status === "flagged_my_jewellery"
             || status === "lcl_incomplete_container" || status === "lcl_no_date_found"
             || status === "lcl_no_document_found") return "job-badge-warn";
         return "job-badge-pending";
     }
 
-    function renderOperationsError(message) {
-        const banner = document.getElementById(_opBannerId());
-        const panel = document.getElementById(_opPanelId());
-        const emptyState = document.getElementById(_opEmptyStateId());
-        if (banner) banner.innerHTML = `<div class="process-banner process-banner-error"><i class="fa-solid fa-triangle-exclamation"></i> <span class="process-banner-text">${escapeHtml(message)}</span></div>`;
+    function renderOperationsError(message, flow) {
+        const f = flow || window.__activeProcessFlow || "cmr";
+        const banner = document.getElementById(_opBannerId(f));
+        const panel = document.getElementById(_opPanelId(f));
+        const emptyState = document.getElementById(_opEmptyStateId(f));
+
+        const isNotRunning = message && (
+            message.toLowerCase().includes("not running") ||
+            message.toLowerCase().includes("could not reach") ||
+            message.toLowerCase().includes("winerror 10061") ||
+            message.toLowerCase().includes("connection could be made")
+        );
+
+        if (banner) {
+            if (isNotRunning) {
+                autoLaunchShyppleBrowser(f);
+            } else {
+                banner.innerHTML = `<div class="process-banner process-banner-error"><i class="fa-solid fa-triangle-exclamation"></i> <span class="process-banner-text">${escapeHtml(message)}</span></div>`;
+            }
+        }
         // No batch is actually running when this fires - drop the loading/queued panel
         // instead of leaving it sitting next to the error, which read as contradictory.
         if (panel) { panel.style.display = "none"; panel.innerHTML = ""; }
         if (emptyState) emptyState.style.display = "block";
     }
 
-    function renderOperationsPanel(state) {
-        const panel = document.getElementById(_opPanelId());
-        const banner = document.getElementById(_opBannerId());
-        const emptyState = document.getElementById(_opEmptyStateId());
+    function renderOperationsPanel(state, flow) {
+        const f = flow || window.__activeProcessFlow;
+        const panel = document.getElementById(_opPanelId(f));
+        const banner = document.getElementById(_opBannerId(f));
+        const emptyState = document.getElementById(_opEmptyStateId(f));
         if (!panel) return;
         panel.style.display = "block";
         if (emptyState) emptyState.style.display = "none";
 
-        window.__activeBatchMessageIds = window.__activeBatchMessageIds || null;
         let jobs = state.jobs || [];
-        if (window.__activeBatchMessageIds && window.__activeBatchMessageIds.size > 0) {
+        const activeIds = window.__activeBatchMessageIds[f];
+        if (activeIds && activeIds.size > 0) {
             // Self-healing: a Delivery Order's Arrival Notice cross-verification can
             // discover a mail via BL-number search mid-batch and insert it as its OWN
             // job (see shypple_process.py's _process_discovered_arrival_notice),
@@ -2438,11 +2632,11 @@
             // NOT loosen the filter for anything else - an unrelated stale job from a
             // previous batch has no parent_message_id pointing into this Set.
             jobs.forEach(j => {
-                if (j.parent_message_id && window.__activeBatchMessageIds.has(j.parent_message_id)) {
-                    window.__activeBatchMessageIds.add(j.message_id);
+                if (j.parent_message_id && activeIds.has(j.parent_message_id)) {
+                    activeIds.add(j.message_id);
                 }
             });
-            const filtered = jobs.filter(j => window.__activeBatchMessageIds.has(j.message_id));
+            const filtered = jobs.filter(j => activeIds.has(j.message_id));
             // Only trust the client-side filter when it actually matches something the
             // server is reporting. If it matches nothing - stale ids left over from a
             // selection that never became the active batch, or the server moved on to a
@@ -2458,7 +2652,7 @@
                     <div class="process-banner process-banner-warn">
                         <i class="fa-solid fa-triangle-exclamation"></i>
                         <span class="process-banner-text">Complete the Google sign-in in the Shypple browser window that opened, then click Proceed.</span>
-                        <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Proceed</button>
+                        <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Proceed</button>
                     </div>`;
             } else {
                 const awaitingUpload = jobs.find(j => j.status === "awaiting_upload_confirmation");
@@ -2513,8 +2707,8 @@
                             <div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px;">
                                 <i class="fa-solid fa-triangle-exclamation"></i>
                                 <span class="process-banner-text">"${escapeHtml(awaitingUpload.subject || awaitingUpload.message_id)}" needs upload: <b>${reasons}</b>.</span>
-                                <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm upload</button>
-                                <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                                <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm upload</button>
+                                <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                             </div>
                             ${diffBlocks}
                         </div>`;
@@ -2527,8 +2721,8 @@
                             <span class="process-banner-text">Form filled for "${escapeHtml(awaitingSubmit.subject || awaitingSubmit.message_id)}" - review before submitting:
                             <b>file</b> ${escapeHtml(p.filename || "")}, <b>type</b> ${escapeHtml(p.matched_type || "")},
                             <b>containers</b> ${escapeHtml(containersText)}, <b>organization</b> ${escapeHtml(p.organization || "(none)")}.</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm &amp; submit</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm &amp; submit</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (awaitingForward) {
                     banner.innerHTML = `
@@ -2536,8 +2730,8 @@
                             <i class="fa-solid fa-triangle-exclamation"></i>
                             <span class="process-banner-text">"${escapeHtml(awaitingForward.subject || awaitingForward.message_id)}" has no organization set on Shypple.
                             Forward it to <b>${escapeHtml(awaitingForward.forward_to || "")}</b> and move it to <b>label:${escapeHtml(awaitingForward.forward_label || "")}</b>?</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm forward</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm forward</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (awaitingOrgSwitch) {
                     banner.innerHTML = `
@@ -2546,8 +2740,8 @@
                             <span class="process-banner-text">"${escapeHtml(awaitingOrgSwitch.subject || awaitingOrgSwitch.message_id)}" matched a shipment
                             (tried: ${escapeHtml((awaitingOrgSwitch.tried_containers || []).join(", "))}) with no organization set under Shypple B.V.
                             Switch to <b>${escapeHtml(awaitingOrgSwitch.target_org || "Shypple Fresh B.V.")}</b> and re-search the same container(s) there?</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm switch</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm switch</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (awaitingNoRecord) {
                     banner.innerHTML = `
@@ -2556,8 +2750,8 @@
                             <span class="process-banner-text">"${escapeHtml(awaitingNoRecord.subject || awaitingNoRecord.message_id)}" - no record found on Shypple for any
                             extracted container (tried: ${escapeHtml((awaitingNoRecord.tried_containers || []).join(", "))}).
                             Mark unread and move to <b>label:${escapeHtml(awaitingNoRecord.no_record_label || "")}</b>?</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (jobs.find(j => j.status === "awaiting_lcl_container_confirmation")) {
                     const j = jobs.find(x => x.status === "awaiting_lcl_container_confirmation");
@@ -2568,8 +2762,8 @@
                             <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - filled on the Containers tab:
                             <b>container</b> ${escapeHtml(p.container_number || "(none)")}, <b>devanning date</b> ${escapeHtml(p.devanning_date || "(none)")}.
                             Confirm before editing customs number / CFS and updating the shipment?</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (jobs.find(j => j.status === "awaiting_lcl_delivery_confirmation")) {
                     const j = jobs.find(x => x.status === "awaiting_lcl_delivery_confirmation");
@@ -2586,8 +2780,8 @@
                             <b>Devanning date</b> (Containers tab): ${fieldSpan(p.devanning_date, p.has_devanning_date)}<br/>
                             <b>Customs number</b> (Edit tab): ${fieldSpan(e.customs_number, e.has_customs_number)} &middot;
                             <b>Discharge CFS</b> (Edit tab): ${fieldSpan(e.cfs_address, e.has_cfs_address)}</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (jobs.find(j => j.status === "awaiting_arrival_notice_verification")) {
                     const j = jobs.find(x => x.status === "awaiting_arrival_notice_verification");
@@ -2611,8 +2805,37 @@
                             ${fieldRow("Customs Number", ex.customs_number, cur.customs_number, c.customs_match)}<br/>
                             ${fieldRow("Discharge CFS", ex.cfs_address, cur.cfs_address, c.cfs_match)}
                             ${c.needs_manual_verification ? '<br/><span style="color:#b45309;"><i class="fa-solid fa-circle-info"></i> Neither field could be extracted from the document - please verify manually.</span>' : ""}</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Yes, verified</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">No, not verified</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Yes, verified</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">No, not verified</button>
+                        </div>`;
+                } else if (jobs.find(j => j.status === "awaiting_lcl_document_diff_confirmation")) {
+                    const j = jobs.find(x => x.status === "awaiting_lcl_document_diff_confirmation");
+                    const d = j.document_diff_preview || {};
+                    const diffs = d.differences || [];
+                    // Same .upload-diff-table markup the CMR awaiting_upload_confirmation
+                    // banner already uses (see diffBlocks above) - one table here since
+                    // verify_existing_document_before_upload compares a single doc_type
+                    // per call, unlike CMR's per-type loop.
+                    const diffTable = diffs.length ? `
+                        <table class="upload-diff-table">
+                            <thead><tr><th>Field</th><th>Email's copy</th><th>Shypple's copy</th></tr></thead>
+                            <tbody>${diffs.map(x => `<tr>`
+                                + `<td>${escapeHtml(x.field || "")}</td>`
+                                + `<td>${escapeHtml(x.email_value || "")}</td>`
+                                + `<td>${escapeHtml(x.shypple_value || "")}</td>`
+                                + `</tr>`).join("")}</tbody>
+                        </table>` : "";
+                    banner.innerHTML = `
+                        <div class="process-banner process-banner-warn" style="flex-direction:column; align-items:stretch;">
+                            <div style="display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px;">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - an existing
+                                <b>${escapeHtml(d.doc_type || "document")}</b> on Shypple differs from the email's copy
+                                (${escapeHtml(d.reason || "")}). Upload the email's version?</span>
+                                <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm &amp; upload</button>
+                                <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
+                            </div>
+                            ${diffTable}
                         </div>`;
                 } else if (jobs.find(j => j.status === "awaiting_lcl_date_confirmation")) {
                     const j = jobs.find(x => x.status === "awaiting_lcl_date_confirmation");
@@ -2623,8 +2846,8 @@
                             <span class="process-banner-text">"${escapeHtml(j.subject || j.message_id)}" - devanning date differs:
                             Shypple has <b>${escapeHtml(p.current || "(empty)")}</b>, email says <b>${escapeHtml(p.extracted || "")}</b>.
                             Confirm to update it on Shypple?</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm &amp; update</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm &amp; update</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else if (jobs.find(j => j.status === "awaiting_lcl_submit_confirmation")) {
                     const j = jobs.find(x => x.status === "awaiting_lcl_submit_confirmation");
@@ -2635,8 +2858,8 @@
                             <i class="fa-solid fa-triangle-exclamation"></i>
                             <span class="process-banner-text">Form filled for "${escapeHtml(j.subject || j.message_id)}" - review before submitting:
                             <b>file</b> ${escapeHtml(p.filename || "")}, <b>type</b> ${escapeHtml(p.matched_type || "")}, <b>containers</b> ${escapeHtml(containersText)}.</span>
-                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations()">Confirm &amp; submit</button>
-                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations()">Skip this email</button>
+                            <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm &amp; submit</button>
+                            <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
                 } else {
                     // Nothing is waiting on a decision right now, but the batch can
@@ -2753,10 +2976,18 @@
                 const starColor = job.star_color || "blue";
                 details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-star-half-stroke"></i> ${starColor[0].toUpperCase()}${starColor.slice(1)} star NOT set: ${escapeHtml(job.star_error || "unknown error")}</span>`);
             }
+            // read_action ("read"/"unread") records which of _mark_source_email_read /
+            // _mark_source_email_unread actually ran - both write into the same
+            // read_status/read_error fields, so this is needed to show the right
+            // wording (an "up_to_date"/"already identical" outcome marks READ; an
+            // outcome where something was actually uploaded marks UNREAD).
+            const readAction = job.read_action || "unread";
             if (job.read_status === "done") {
-                details.push('<span style="color:#0f9d76;"><i class="fa-solid fa-envelope-open"></i> Marked source email as READ</span>');
+                const icon = readAction === "read" ? "fa-envelope-open" : "fa-envelope";
+                details.push(`<span style="color:#0f9d76;"><i class="fa-solid ${icon}"></i> Marked source email as ${readAction}</span>`);
             } else if (job.read_status === "failed") {
-                details.push(`<span style="color:#dc2626;"><i class="fa-solid fa-envelope"></i> Could not mark source email as read: ${escapeHtml(job.read_error || "unknown error")}</span>`);
+                const icon = readAction === "read" ? "fa-envelope" : "fa-envelope-open";
+                details.push(`<span style="color:#dc2626;"><i class="fa-solid ${icon}"></i> Could not mark source email as ${readAction}: ${escapeHtml(job.read_error || "unknown error")}</span>`);
             }
             if (job.forward_status === "sent") {
                 details.push('<span style="color:#0f9d76;"><i class="fa-solid fa-check"></i> Email forwarded to nl.importsea@shypple.com and labeled a-release-orders there</span>');
@@ -3607,9 +3838,9 @@
             .catch(() => { });
     }
 
-    // Call immediately on page load, and auto-refresh emails every 10 seconds in the background
+    // Call immediately on page load, and start the 10-second countdown timer for auto-refresh
     fetchEmailsLive();
-    setInterval(fetchEmailsLive, 10000);
+    startAutoRefreshCountdown();
     setInterval(checkForShellUpdate, 10000);
 
     // Run auto-classification every 5 seconds to identify document types for newly arrived mails
@@ -3698,11 +3929,15 @@
     // Pick up a Shypple batch that's already running server-side from an earlier page
     // load/session - without this, the Operations Process tab shows a stale "No batch
     // running yet" panel even though a batch is genuinely paused there waiting for
-    // confirmation, until the user tries to start a new one and gets a 409.
-    fetch("/api/operations/status")
-        .then(res => res.json())
-        .then(data => { if (data.success && data.state && data.state.running) startOperationsPolling(); })
-        .catch(() => { });
+    // confirmation, until the user tries to start a new one and gets a 409. CMR and LCL
+    // each run their own independent instance now, so both are checked independently -
+    // either (or both) can resume polling on load.
+    ["cmr", "lcl"].forEach(flow => {
+        fetch(`/api/operations/status?role=${flow}`)
+            .then(res => res.json())
+            .then(data => { if (data.success && data.state && data.state.running) startOperationsPolling(flow); })
+            .catch(() => { });
+    });
 
     function _renderScraperStatusBanner(data) {
         const el = document.getElementById("scraper-status-banner");
@@ -3721,6 +3956,75 @@
         }
         el.style.display = "none";
         el.innerHTML = "";
+    }
+
+    // --- Auto-Refresh Countdown Timer Logic ---
+    const AUTO_REFRESH_INTERVAL_SEC = 10;
+    let refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
+    let isRefreshTimerPaused = false;
+    let refreshTimerInterval = null;
+
+    function updateRefreshTimerUI() {
+        const countdownEl = document.getElementById("refresh-timer-countdown");
+        const clockIcon = document.getElementById("timer-clock-icon");
+        const spinnerIcon = document.getElementById("timer-spinner-icon");
+        const widget = document.getElementById("refresh-timer-widget");
+        const pauseIcon = document.getElementById("timer-pause-icon");
+
+        if (!countdownEl) return;
+
+        if (isRefreshTimerPaused) {
+            countdownEl.innerText = "Paused";
+            if (widget) widget.classList.add("paused");
+            if (pauseIcon) pauseIcon.className = "fa-solid fa-play";
+            if (clockIcon) clockIcon.style.display = "inline-block";
+            if (spinnerIcon) spinnerIcon.style.display = "none";
+            return;
+        }
+
+        if (widget) widget.classList.remove("paused");
+        if (pauseIcon) pauseIcon.className = "fa-solid fa-pause";
+
+        if (refreshCountdownSeconds <= 0) {
+            countdownEl.innerText = "Refreshing...";
+            if (clockIcon) clockIcon.style.display = "none";
+            if (spinnerIcon) spinnerIcon.style.display = "inline-block";
+        } else {
+            countdownEl.innerText = refreshCountdownSeconds + "s";
+            if (clockIcon) clockIcon.style.display = "inline-block";
+            if (spinnerIcon) spinnerIcon.style.display = "none";
+        }
+    }
+
+    function startAutoRefreshCountdown() {
+        updateRefreshTimerUI();
+        if (refreshTimerInterval) clearInterval(refreshTimerInterval);
+
+        refreshTimerInterval = setInterval(() => {
+            if (isRefreshTimerPaused) return;
+
+            refreshCountdownSeconds--;
+            if (refreshCountdownSeconds <= 0) {
+                updateRefreshTimerUI();
+                fetchEmailsLive(false);
+                refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
+            }
+            updateRefreshTimerUI();
+        }, 1000);
+    }
+
+    function manualRefreshWithTimer() {
+        refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
+        updateRefreshTimerUI();
+        fetchEmailsLive(true);
+    }
+
+    function toggleTimerPause() {
+        isRefreshTimerPaused = !isRefreshTimerPaused;
+        if (!isRefreshTimerPaused) {
+            refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
+        }
+        updateRefreshTimerUI();
     }
 
     // The label box no longer changes what's fetched - this pipeline's only source is
@@ -3754,6 +4058,10 @@
                 if (isManual) {
                     showToast("Failed to fetch live emails: " + err, true);
                 }
+            })
+            .finally(() => {
+                refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
+                updateRefreshTimerUI();
             });
     }
 

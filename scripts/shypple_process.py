@@ -15,11 +15,13 @@ import re
 import json
 import queue
 import base64
+import argparse
 import mimetypes
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import shutil
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -33,6 +35,19 @@ except Exception:
     pass
 
 from shared.download_utils import fetch_bytes_robust, get_downloads_dir
+
+# Two independent instances of this same script can run side by side - one dedicated
+# to the CMR pipeline, one to the LCL Arrivals/Release pipeline - each with its own
+# Chrome profile/port, so a batch on one never has to wait on a batch running (or
+# paused on a confirmation gate) on the other. Selected via --role on the command
+# line (see main()); everything else in this file (batch_state, the job queue, the
+# control server) is already just module-level globals scoped to one OS process, so
+# running two processes gives full independence for free. CMR keeps the original
+# port/profile so an existing logged-in instance isn't disrupted.
+ROLE_CONFIG = {
+    "cmr": {"port": 40006, "profile_dir": "shypple_profile"},
+    "lcl": {"port": 40007, "profile_dir": "shypple_profile_lcl"},
+}
 
 SHYPPLE_LOGIN_URL = "https://app.shypple.com/login?redirect=%2Fdashboard"
 SHYPPLE_ADMIN_BASE = "https://api.shypple.com"
@@ -92,6 +107,7 @@ _AWAITING_STATUSES = (
     "awaiting_org_switch_confirmation",
     "awaiting_lcl_container_confirmation", "awaiting_lcl_submit_confirmation",
     "awaiting_lcl_delivery_confirmation", "awaiting_lcl_date_confirmation",
+    "awaiting_arrival_notice_verification", "awaiting_lcl_document_diff_confirmation",
 )
 
 # Where a "My Jewellery" customer match halts the LCL Arrivals/Release flow gets
@@ -191,6 +207,11 @@ def _refresh_document_type_options(page):
         return {"success": True, "options": options}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+# Set once in main() from --role, before the HTTP server or batch loop start - read by
+# run_batch's per-job dispatch as a defensive guard against a job landing on the wrong
+# instance (e.g. a stale/misconfigured caller), never written anywhere else.
+CURRENT_ROLE = "cmr"
 
 STATE_LOCK = threading.Lock()
 batch_state = {
@@ -863,26 +884,34 @@ def scrape_document_rows(page):
     since verifying content requires fetching the SPECIFIC row's file, not just
     knowing the type appears somewhere in the table.
 
-    This previously scraped NO container info at all, which meant
-    _find_uploaded_row_for_type's container check - `row.get("containers") or []`
-    always empty - could never intersect with the email's container(s), so every row
-    was treated as "not uploaded for this container" even when the type AND container
-    genuinely already matched. That silently broke the entire compare-before-upload
-    skip path: it never got a row to compare against, so it always fell through to
-    "not uploaded yet" and asked for a needless re-upload. Selector is a best-effort
-    guess (mirroring the known upload-FORM field id "shipment_document_container_ids"
-    used by fill_shipment_document_form) with a couple of fallbacks, since an existing
-    row's real DOM wasn't available to confirm directly - verify against a live page
-    if containers still don't show up."""
+    Reads document type(s) and container(s) from both native <option> elements and
+    jQuery Select2 choice elements for 100% accuracy."""
     return page.evaluate("""() => {
         const rows = Array.from(document.querySelectorAll('#shipment-document-table .body form'));
         return rows.map(row => {
             const typeSelect = row.querySelector('.document_types_selector');
-            const types = typeSelect ? Array.from(typeSelect.selectedOptions).map(o => o.textContent.trim()) : [];
-            const containerSelect = row.querySelector('.document_containers_selector')
+            let types = [];
+            if (typeSelect) {
+                const optTypes = Array.from(typeSelect.options)
+                    .filter(o => o.selected || o.hasAttribute('selected'))
+                    .map(o => (o.textContent || '').trim());
+                const choiceTypes = Array.from(row.querySelectorAll('.document_types_selector ~ .select2 .select2-selection__choice'))
+                    .map(el => (el.getAttribute('title') || el.textContent || '').replace(/^[×x]/i, '').trim());
+                types = Array.from(new Set([...optTypes, ...choiceTypes])).filter(Boolean);
+            }
+            const containerSelect = row.querySelector('.containers_selector')
+                || row.querySelector('.document_containers_selector')
                 || row.querySelector('select[id*="container_ids"]')
                 || row.querySelector('select[name*="container_ids"]');
-            const containers = containerSelect ? Array.from(containerSelect.selectedOptions).map(o => o.textContent.trim()) : [];
+            let containers = [];
+            if (containerSelect) {
+                const optContainers = Array.from(containerSelect.options)
+                    .filter(o => o.selected || o.hasAttribute('selected'))
+                    .map(o => (o.textContent || '').trim());
+                const choiceContainers = Array.from(row.querySelectorAll('.containers_selector ~ .select2 .select2-selection__choice'))
+                    .map(el => (el.getAttribute('title') || el.textContent || '').replace(/^[×x]/i, '').trim());
+                containers = Array.from(new Set([...optContainers, ...choiceContainers])).filter(Boolean);
+            }
             const link = row.querySelector('a[href*="/download"]');
             return {
                 types: types,
@@ -1155,19 +1184,68 @@ def check_edit_tab_customs_and_cfs(page):
     }""")
 
 
+def _looks_like_error_page(data, mime):
+    """True if ``data``/``mime`` looks like an HTML/XML error or login page rather
+    than a real document - e.g. Shypple's session cookie got rejected, or an S3/GCS
+    presigned URL returned an <Error>/<AccessDenied> XML body. A bare "not None"
+    check on fetch_bytes_robust's result isn't enough to catch this: the fetch
+    genuinely succeeds (HTTP 200, non-empty body), it's just NOT the file - and
+    saving/serving that mislabeled blob as if it were the real document is exactly
+    what previously showed up as a blank/white page when the operator opened it,
+    since a PDF viewer can't render an HTML or XML payload. Deliberately
+    conservative: only flags the unambiguous case (empty body, or a body that starts
+    with HTML/XML markup) so a real binary document is never wrongly rejected."""
+    if not data:
+        return True
+    mime_clean = (mime or "").split(";")[0].strip().lower()
+    if mime_clean in ("text/html", "application/xhtml+xml", "application/xml", "text/xml"):
+        return True
+    head = data[:256].lstrip().lower()
+    return head.startswith((b"<!doctype html", b"<html", b"<?xml", b"<error"))
+
+
 def download_shypple_document_bytes(page, href):
     """Fetch an already-uploaded Shypple document's raw bytes via the authenticated
     browser session. Uses shared.download_utils.fetch_bytes_robust: a plain
     page.request.get (reuses the browser's own cookies, no separate auth needed),
-    falling back to an in-page JS fetch if that's rejected - previously a bare
-    page.request.get() failure here just gave up and the caller assumed "it's fine"
-    without actually comparing, silently skipping the deep content check."""
+    handling redirects to S3 presigned URLs without auth header pollution, and
+    falling back to native Playwright download / in-page JS fetch if rejected.
+    _looks_like_error_page guards each technique in turn - a technique that
+    "succeeds" with an HTML/XML error or login page instead of the real file is
+    treated the same as an outright failure, so the next technique gets a chance
+    instead of that mislabeled content silently being saved/served as the document
+    (see its own docstring for why this matters)."""
+    if not href:
+        return None, None
     url = href if href.startswith("http") else SHYPPLE_ADMIN_BASE + href
     try:
-        return fetch_bytes_robust(page, url)
+        data, mime = fetch_bytes_robust(page, url)
+        if data is not None and not _looks_like_error_page(data, mime):
+            return data, mime
+        if data is not None:
+            log_system(f"download_shypple_document_bytes: fetch_bytes_robust returned an HTML/XML "
+                       f"error/login page instead of the document (mime={mime!r}) - trying native download instead.")
     except Exception as e:
-        log_system(f"download_shypple_document_bytes error: {e}")
-        return None, None
+        log_system(f"download_shypple_document_bytes fetch error: {e}")
+
+    # Fallback to in-page native Playwright download if page has the link
+    try:
+        if page:
+            clean_href = href.split("?")[0]
+            link_loc = page.locator(f'a[href="{href}"], a[href*="{clean_href}"]')
+            if link_loc.count() > 0:
+                with page.expect_download(timeout=10000) as download_info:
+                    link_loc.first.click(force=True)
+                download = download_info.value
+                temp_path = download.path()
+                if temp_path and os.path.exists(temp_path):
+                    with open(temp_path, "rb") as f:
+                        data = f.read()
+                    return data, "application/pdf"
+    except Exception as e:
+        log_system(f"download_shypple_document_bytes native download fallback error: {e}")
+
+    return None, None
 
 
 def read_shipment_customer(page):
@@ -1521,13 +1599,51 @@ def fill_shipment_document_form(page, doc_type, file_bytes, file_mime, filename,
         # errors from the same rejected upload) even though the actual bytes are fine.
         # Always ensure a real extension, derived from the MIME type rather than
         # assuming .pdf, before it ever reaches the file input.
-        upload_name = filename or ""
-        if not os.path.splitext(upload_name)[1]:
-            ext = mimetypes.guess_extension((file_mime or "").split(";")[0].strip()) or ".pdf"
-            upload_name = f"{upload_name or doc_type}{ext}"
-
         if not file_bytes or len(file_bytes) == 0:
             return {"success": False, "error": f"File bytes for '{doc_type}' are empty (0 bytes)"}
+
+        upload_name = filename or ""
+        file_ext = os.path.splitext(upload_name)[1].lower()
+        mime_clean = (file_mime or "").split(";")[0].strip().lower()
+
+        # Shypple rejects HTML files ("You are not allowed to upload 'html' files").
+        # If the attachment/document is HTML, convert it to a PDF via Playwright before uploading.
+        is_html = (
+            file_ext in (".html", ".htm") or
+            mime_clean in ("text/html", "application/xhtml+xml") or
+            (file_bytes[:512].strip().lower().startswith((b"<!doctype html", b"<html")) or b"<head" in file_bytes[:512].lower())
+        )
+
+        if is_html:
+            try:
+                html_str = file_bytes.decode("utf-8", errors="ignore")
+                pdf_page = page.context.new_page()
+                pdf_page.set_content(html_str)
+                pdf_bytes = pdf_page.pdf(format="A4", print_background=True)
+                pdf_page.close()
+                file_bytes = pdf_bytes
+                file_mime = "application/pdf"
+                base_name = os.path.splitext(upload_name)[0] or doc_type
+                upload_name = f"{base_name}.pdf"
+                log_system(f"Converted HTML document '{filename or doc_type}' to PDF for Shypple upload.")
+            except Exception as e:
+                log_system(f"Failed to convert HTML document to PDF: {e}")
+                return {"success": False, "error": f"Shypple does not allow uploading HTML files and PDF conversion failed: {e}"}
+
+        ALLOWED_SHYPPLE_EXTENSIONS = {
+            ".bmp", ".csv", ".doc", ".docx", ".eml", ".jpg", ".jpeg", ".gif",
+            ".msg", ".pdf", ".png", ".rtf", ".tif", ".tiff", ".txt", ".xlsx",
+            ".xls", ".xlsb", ".xlsm", ".xml", ".json"
+        }
+        current_ext = os.path.splitext(upload_name)[1].lower()
+        if not current_ext or current_ext not in ALLOWED_SHYPPLE_EXTENSIONS:
+            ext = mimetypes.guess_extension((file_mime or "").split(";")[0].strip()) or ".pdf"
+            if ext.lower() not in ALLOWED_SHYPPLE_EXTENSIONS:
+                ext = ".pdf"
+            base_name = os.path.splitext(upload_name)[0] or doc_type
+            upload_name = f"{base_name}{ext}"
+            if ext == ".pdf":
+                file_mime = "application/pdf"
 
         file_input.set_input_files({
             "name": upload_name,
@@ -1675,7 +1791,7 @@ def _fetch_email_document(message_id, doc_type, subject="", attachment_index=Non
         return None, None, None, str(e)
 
 
-def _compare_document_versions_remote(message_id, doc_type, other_bytes, other_mime, subject="", attachment_index=None):
+def _compare_document_versions_remote(message_id, doc_type, other_bytes, other_mime, subject="", attachment_index=None, label=None):
     """POST to Flask's /operations/compare_document, which fetches the email's own copy
     and runs the Gemini same/different comparison (that logic lives in
     document_classifier.py, not duplicated here). Returns the result dict on success,
@@ -1683,16 +1799,22 @@ def _compare_document_versions_remote(message_id, doc_type, other_bytes, other_m
     previously discarded the actual reason (e.g. Flask's 404 body explaining exactly
     which attachment couldn't be found) and left the caller logging an unhelpful
     generic "no response". attachment_index disambiguates a mail with two or more
-    same-typed attachments (e.g. two "Other" documents)."""
+    same-typed attachments (e.g. two "Other" documents). label is omitted from the
+    request body when None, so Flask's own default ("a-cmr") still applies for CMR's
+    unlabeled calls - an LCL caller (verify_existing_document_before_upload) MUST pass
+    label=_LCL_LABEL_KEY, same rule as _fetch_email_document's own label param."""
     try:
-        body = json.dumps({
+        body_dict = {
             "message_id": message_id,
             "doc_type": doc_type,
             "subject": subject,
             "attachment_index": attachment_index,
             "other_file_base64": base64.b64encode(other_bytes).decode("ascii"),
             "other_mime": other_mime or "application/pdf",
-        }).encode("utf-8")
+        }
+        if label:
+            body_dict["label"] = label
+        body = json.dumps(body_dict).encode("utf-8")
         req = urllib.request.Request(
             f"{FLASK_BASE}/api/operations/compare_document", data=body,
             headers={"Content-Type": "application/json"}, method="POST",
@@ -1821,54 +1943,20 @@ def _star_source_email(job, color):
             job["star_error"] = str(e)
 
 
-def _mark_source_email_read(job):
-    """Ask the Gmail automation to mark this job's source email read - per the
-    operator's explicit rule, the mail should stay unread (still needs attention)
-    all the way through classification and upload PREPARATION, and only flip to read
-    (alongside the yellow star _star_source_email already sets) once every document
-    has actually finished uploading to Shypple - never before. Records
-    job["read_status"] ("done"/"failed") so the dashboard can show whether it landed."""
-    message_id = job.get("message_id") or ""
-    if not message_id.startswith("pw_"):
-        log_job(job, "Skipped marking read: this email isn't from the delegated mailbox the "
-                     "Gmail automation can act on.")
-        with STATE_LOCK:
-            job["read_status"] = "failed"
-            job["read_error"] = "Not a delegated-mailbox email."
-        return
-    raw_id = message_id[len("pw_"):]
-    try:
-        params = urllib.parse.urlencode({"id": raw_id, "type": "mark_read"})
-        url = f"{GMAIL_CONTROL_SERVER}/action?{params}"
-        # Matches (with margin) open_gmail.py's /action internal wait - was previously
-        # LESS than that server-side wait, so this client could give up before the
-        # server had even finished responding.
-        with urllib.request.urlopen(url, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        if result.get("success"):
-            log_job(job, "Marked the source email as read.")
-            with STATE_LOCK:
-                job["read_status"] = "done"
-        else:
-            log_job(job, f"Could not mark the source email as read: {result.get('error')}")
-            with STATE_LOCK:
-                job["read_status"] = "failed"
-                job["read_error"] = result.get("error")
-    except Exception as e:
-        log_job(job, f"Could not reach the Gmail automation to mark the email read: {e}")
-        with STATE_LOCK:
-            job["read_status"] = "failed"
-            job["read_error"] = str(e)
-
-
 def _mark_source_email_unread(job):
-    """Ask the Gmail automation to mark this job's source email UNREAD - the LCL
-    Arrivals/Release flow's terminal read-state is the opposite of the CMR pipeline's
-    (see _mark_source_email_read above): every outcome here (done, cluster/FCL skip,
-    etc.) leaves the mail unread + yellow-starred so it stays visible as "still needs a
-    look", per the operator's explicit rule for this label. Records
-    job["read_status"] ("done"/"failed")."""
+    """Ask the Gmail automation to mark this job's source email UNREAD - used
+    whenever a document was actually (re-)uploaded/changed, for BOTH the CMR and LCL
+    Arrivals/Release pipelines alike, so a successfully-processed email stays
+    visibly flagged - unread + yellow star (alongside the star _star_source_email
+    already sets) - for the "Process yellow-starred" -> "Processed - India filing"
+    sweep, per the operator's explicit rule. An outcome where NOTHING needed
+    uploading (already identical) uses _mark_source_email_read instead - see that
+    function. Records job["read_status"] ("done"/"failed") and job["read_action"] =
+    "unread" (which action actually ran, since both functions share this field) so
+    the dashboard can show the right wording."""
     message_id = job.get("message_id") or ""
+    with STATE_LOCK:
+        job["read_action"] = "unread"
     if not message_id.startswith("pw_"):
         log_job(job, "Skipped marking unread: this email isn't from the delegated mailbox the "
                      "Gmail automation can act on.")
@@ -1896,6 +1984,95 @@ def _mark_source_email_unread(job):
         with STATE_LOCK:
             job["read_status"] = "failed"
             job["read_error"] = str(e)
+
+
+def _mark_source_email_read(job):
+    """Ask the Gmail automation to mark this job's source email READ - used whenever
+    NOTHING needed uploading because it's already identical (CMR's up_to_date
+    branch of _verify_and_upload_documents; LCL's "already uploaded and identical"
+    branch of handle_arrival_notice/handle_delivery_order, via
+    verify_existing_document_before_upload), for both pipelines alike. An outcome
+    where a document IS actually (re-)uploaded uses _mark_source_email_unread
+    instead - see that function. Records job["read_status"] ("done"/"failed") and
+    job["read_action"] = "read" (which action actually ran, since both functions
+    share this field) so the dashboard can show the right wording."""
+    message_id = job.get("message_id") or ""
+    with STATE_LOCK:
+        job["read_action"] = "read"
+    if not message_id.startswith("pw_"):
+        log_job(job, "Skipped marking read: this email isn't from the delegated mailbox the Gmail automation can act on.")
+        with STATE_LOCK:
+            job["read_status"] = "failed"
+            job["read_error"] = "Not a delegated-mailbox email."
+        return
+    raw_id = message_id[len("pw_"):]
+    try:
+        params = urllib.parse.urlencode({"id": raw_id, "type": "mark_read"})
+        url = f"{GMAIL_CONTROL_SERVER}/action?{params}"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        if result.get("success"):
+            log_job(job, "Marked the source email as read.")
+            with STATE_LOCK:
+                job["read_status"] = "done"
+        else:
+            log_job(job, f"Could not mark the source email as read: {result.get('error')}")
+            with STATE_LOCK:
+                job["read_status"] = "failed"
+                job["read_error"] = result.get("error")
+    except Exception as e:
+        log_job(job, f"Could not reach the Gmail automation to mark the email read: {e}")
+        with STATE_LOCK:
+            job["read_status"] = "failed"
+            job["read_error"] = str(e)
+
+
+def verify_existing_document_before_upload(page, job, doc_type, mail_bytes, mail_mime, containers, attachment_index=None):
+    """Scrape #shipment-document-table on Shypple's Documents tab before uploading.
+    If a document matching doc_type AND container number is already uploaded:
+      1. Download the existing document from Shypple by clicking its download link.
+      2. Save a local copy in the system Downloads folder.
+      3. Extract/compare content from BOTH documents (mail copy vs Shypple copy).
+      4. Returns dict:
+         {"exists": True/False, "same": True/False, "differences": [...], "reason": str}
+
+    LCL-only (both current callers - handle_arrival_notice/handle_delivery_order -
+    process LCL mail): passes label=_LCL_LABEL_KEY to _compare_document_versions_remote
+    so the email-side fetch it triggers resolves under the LCL label - required, or a
+    retry on this mail could corrupt its classification under the CMR Cmr/Other
+    override rule (see _fetch_email_document's docstring for the same rule)."""
+    open_documents_tab(page)
+    doc_rows = scrape_document_rows(page)
+    row = _find_uploaded_row_for_type(doc_type, doc_rows, email_containers=containers)
+    if not row or not row.get("downloadHref"):
+        return {"exists": False, "same": False, "differences": [], "reason": "not uploaded yet"}
+
+    log_job(job, f"Found existing '{doc_type}' on Documents tab ({row.get('filename')}). Downloading to compare...")
+    shypple_bytes, shypple_mime = download_shypple_document_bytes(page, row["downloadHref"])
+    if shypple_bytes is None:
+        log_job(job, f"Could not download existing '{doc_type}' from Shypple to compare.")
+        return {"exists": True, "same": False, "differences": [], "reason": "could not download existing copy"}
+
+    try:
+        saved_filename = save_document_locally(shypple_bytes, row.get("filename") or f"{doc_type}.pdf")
+        log_job(job, f"Saved local copy of existing '{doc_type}' ({saved_filename}) to system Downloads folder.")
+        with STATE_LOCK:
+            job.setdefault("downloaded_files", []).append({"type": doc_type, "filename": saved_filename, "source": "shypple"})
+    except Exception as e:
+        log_job(job, f"Could not save local copy of existing '{doc_type}': {e}")
+
+    verdict = _compare_document_versions_remote(
+        job["message_id"], doc_type, shypple_bytes, shypple_mime, subject=job.get("subject", ""),
+        attachment_index=attachment_index, label=_LCL_LABEL_KEY,
+    )
+    if verdict and verdict.get("same") is True:
+        log_job(job, f"Existing '{doc_type}' on Shypple is IDENTICAL to the email's document.")
+        return {"exists": True, "same": True, "differences": [], "reason": "both documents are same"}
+
+    differences = verdict.get("differences") if verdict else []
+    reason = verdict.get("reason") if verdict else "content differs"
+    log_job(job, f"Existing '{doc_type}' on Shypple DIFFERS from email's document: {reason}")
+    return {"exists": True, "same": False, "differences": differences, "reason": reason}
 
 
 def _record_my_jewellery_flag(job):
@@ -2034,8 +2211,9 @@ def _forward_and_relabel_source_email(job):
 # "arrival_notice", or "delivery_order", plus job["sf_number"] and
 # job["extracted"] (container_number/devanning_date/customs_number/cfs_address, from
 # extract_lcl_arrival_data). Every outcome here leaves the source mail UNREAD +
-# yellow-starred (opposite of the CMR pipeline's mark-read-when-done rule) - see
-# _mark_source_email_unread.
+# yellow-starred - same terminal rule the CMR pipeline uses (see
+# _mark_source_email_unread) - so a successfully-processed email stays visible in an
+# unread+yellow-star sweep for both pipelines alike.
 # ---------------------------------------------------------------------------------
 
 def handle_delay_or_devanning(page, job):
@@ -2049,10 +2227,10 @@ def handle_delay_or_devanning(page, job):
         job["extracted_devanning_date"] = extracted_date or ""
 
     if not extracted_date:
-        log_job(job, "There is no date in the mail and the document for delay/devanning - marking unread + "
+        log_job(job, "There is no date in the mail and the document for delay/devanning - marking read + "
                      "yellow star anyway so it can be reviewed manually.")
         _star_source_email(job, "yellow")
-        _mark_source_email_unread(job)
+        _mark_source_email_read(job)
         set_job_status(job, "lcl_no_date_found", reason="There is no date in the mail and the document for delay and devanning.")
         return
 
@@ -2080,7 +2258,7 @@ def handle_delay_or_devanning(page, job):
         log_job(job, f"Updated devanning date to {extracted_date} and saved.")
 
     _star_source_email(job, "yellow")
-    _mark_source_email_unread(job)
+    _mark_source_email_read(job)
     set_job_status(job, "lcl_done", phase="Done - devanning date verified/updated")
 
 
@@ -2133,10 +2311,10 @@ def handle_arrival_notice(page, job):
         job["message_id"], "Arrival notice", subject=job.get("subject", ""), label=_LCL_LABEL_KEY
     )
     if file_bytes is None:
-        log_job(job, f"Could not fetch the Arrival notice attachment ({fetch_error}) - marking unread + "
+        log_job(job, f"Could not fetch the Arrival notice attachment ({fetch_error}) - marking read + "
                      "yellow star anyway so it isn't lost, but this needs a manual look.")
         _star_source_email(job, "yellow")
-        _mark_source_email_unread(job)
+        _mark_source_email_read(job)
         set_job_status(job, "lcl_no_document_found",
                        reason=f"Could not fetch the Arrival notice attachment: {fetch_error}")
         return
@@ -2145,6 +2323,38 @@ def handle_arrival_notice(page, job):
 
     if not _ensure_org_before_documents_tab(page, job):
         return
+
+    check = verify_existing_document_before_upload(page, job, "Arrival notice", file_bytes, file_mime, [container_number] if container_number else [])
+    if check.get("exists") and check.get("same"):
+        _star_source_email(job, "yellow")
+        _mark_source_email_read(job)
+        set_job_status(job, "lcl_done", phase="Done - Arrival notice already uploaded and identical (no upload needed)")
+        log_job(job, "Arrival notice already present on Shypple and content is identical. Marked email read + yellow star.")
+        return
+
+    if check.get("exists") and not check.get("same"):
+        # An Arrival notice IS already on Shypple but its content differs from the
+        # email's copy - show the operator exactly what differs (field-by-field, from
+        # verify_existing_document_before_upload's Gemini compare) and wait for an
+        # explicit decision before (re-)uploading, per the operator's explicit
+        # request. Falls through into the normal fill/submit flow below once
+        # confirmed - same as the "not uploaded yet" case.
+        _open_confirmation_gate()
+        set_job_status(
+            job, "awaiting_lcl_document_diff_confirmation",
+            phase="Existing 'Arrival notice' on Shypple differs from the email's document - waiting for confirmation",
+            document_diff_preview={
+                "doc_type": "Arrival notice", "reason": check.get("reason"),
+                "differences": check.get("differences") or [],
+            },
+        )
+        log_job(job, f"'Arrival notice' already on Shypple but DIFFERS from the email's document: "
+                     f"{check.get('reason')}. Waiting for confirmation before uploading.")
+        if not _wait_for_confirmation(job):
+            set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
+            log_job(job, "Skipped by operator - Arrival notice was NOT uploaded.")
+            return
+
     open_documents_tab(page)
     fill_result = fill_shipment_document_form(page, "Arrival notice", file_bytes, file_mime, filename, [], None)
     if not fill_result.get("success"):
@@ -2278,6 +2488,25 @@ def _verify_existing_arrival_notice(page, job, arrival_row):
         log_job(job, "Arrival Notice row on the Documents tab has no download link - "
                      "cannot verify its content, falling back to manual verification.")
         file_bytes, file_mime = None, None
+
+    if file_bytes is not None:
+        # Per the operator's explicit request: the Arrival Notice pulled off
+        # Shypple's Documents tab for this verification must land in the system's
+        # real Downloads folder too, same as every other document this pipeline
+        # touches (save_document_locally already does this for the CMR deep-compare
+        # step; _save_mail_document_locally does it for a document fetched from the
+        # email) - previously this was the one document read+used by the pipeline
+        # that never got a local copy saved at all.
+        try:
+            saved_filename = save_document_locally(file_bytes, arrival_row.get("filename") or "Arrival Notice.pdf")
+            log_job(job, f"Saved a local copy of the existing Arrival Notice ({saved_filename}) to Downloads.")
+            with STATE_LOCK:
+                job.setdefault("downloaded_files", []).append(
+                    {"type": "Arrival notice", "filename": saved_filename, "source": "shypple"}
+                )
+        except Exception as e:
+            log_job(job, f"Could not save a local copy of the existing Arrival Notice: {e}")
+
     extracted = _extract_lcl_fields_remote(file_bytes, file_mime, arrival_row.get("filename") or "") if file_bytes else {}
 
     set_job_status(job, "processing", phase="Reading current Edit tab data")
@@ -2304,6 +2533,13 @@ def _verify_existing_arrival_notice(page, job, arrival_row):
     with STATE_LOCK:
         job["arrival_notice_check"] = check_result
 
+    # If Edit tab data and Arrival Notice document data are identical:
+    if customs_match and cfs_match and not needs_manual:
+        log_job(job, "Edit tab data and Arrival Notice document data are identical. No update needed.")
+        with STATE_LOCK:
+            job["arrival_notice_verified"] = True
+        return True
+
     _open_confirmation_gate()
     set_job_status(job, "awaiting_arrival_notice_verification",
                     phase="Waiting for confirmation - verify Arrival Notice data against Edit tab",
@@ -2313,11 +2549,23 @@ def _verify_existing_arrival_notice(page, job, arrival_row):
                  "Waiting for confirmation.")
 
     if not _wait_for_confirmation(job):
-        log_job(job, "Operator selected No - Arrival Notice not verified. Re-uploading the "
-                     "Arrival Notice document before continuing.")
-        return _reupload_arrival_notice(
-            page, job, file_bytes, file_mime, arrival_row.get("filename") or "Arrival Notice.pdf"
-        )
+        log_job(job, "Operator selected No - Arrival Notice not verified.")
+        set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
+        return False
+
+    # Guarantee Arrival Notice PDF is saved locally to system Downloads folder
+    if file_bytes is None and download_href:
+        file_bytes, file_mime = download_shypple_document_bytes(page, download_href)
+        if file_bytes is not None:
+            try:
+                saved_filename = save_document_locally(file_bytes, arrival_row.get("filename") or "Arrival Notice.pdf")
+                log_job(job, f"Saved a local copy of the existing Arrival Notice ({saved_filename}) to Downloads.")
+                with STATE_LOCK:
+                    job.setdefault("downloaded_files", []).append(
+                        {"type": "Arrival notice", "filename": saved_filename, "source": "shypple"}
+                    )
+            except Exception as e:
+                log_job(job, f"Could not save a local copy of the existing Arrival Notice: {e}")
 
     fixes = {}
     if extracted.get("customs_number") and not customs_match:
@@ -2381,28 +2629,15 @@ def _process_discovered_arrival_notice(page, job, found_mail):
     else:
         log_job(job, "Arrival Notice sub-process completed - returning to this Delivery Order.")
 
-    # handle_arrival_notice may have left the browser on a post-submit page - return
-    # to THIS job's own shipment page before continuing.
     if job.get("shipment_path"):
         _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
     return True
 
 
 def verify_or_fetch_arrival_notice(page, job):
-    """New step run at the very start of handle_delivery_order, before its existing
-    Containers-tab check: make sure this shipment's Arrival Notice data (Customs
-    Number, Discharge CFS) is verified/correct before a Delivery Order goes out.
-
-    1. An Arrival Notice document is already on the shipment's Documents tab ->
-       _verify_existing_arrival_notice (download + extract + compare + Yes/No gate).
-    2. None uploaded yet, but a BL number can be pulled from this Delivery Order
-       mail's own subject and a Gmail search for it turns up an Arrival Notice mail
-       -> _process_discovered_arrival_notice (full nested processing, then return).
-    3. Neither applies -> continue the Delivery Order unchanged. Never hard-blocks a
-       Delivery Order just because no Arrival Notice could be found anywhere.
-
-    Returns True if handle_delivery_order should continue, False if it should stop
-    (the job's status is already set to something terminal)."""
+    """Step run at start of handle_delivery_order: make sure this shipment's Arrival
+    Notice data (Customs Number, Discharge CFS) is verified/correct against Edit tab
+    before a Delivery Order goes out."""
     set_job_status(job, "processing", phase="Checking Documents tab for an existing Arrival Notice")
     if not _ensure_org_before_documents_tab(page, job):
         return False
@@ -2425,9 +2660,6 @@ def verify_or_fetch_arrival_notice(page, job):
     for m in matches:
         if not m.get("hasAttachment"):
             continue
-        # Confirm the match is actually an Arrival Notice mail by trying to fetch a
-        # document classified as such - the same check the rest of this pipeline
-        # already trusts, rather than adding new classification logic here.
         test_bytes, test_mime, test_filename, _fetch_error = _fetch_email_document(
             m["id"], "Arrival notice", subject=m.get("subject", ""), label=_LCL_LABEL_KEY,
         )
@@ -2447,44 +2679,34 @@ def verify_or_fetch_arrival_notice(page, job):
 
 
 def handle_delivery_order(page, job):
+    # 1. Extract data from Edit tab and Arrival Notice document, verify and update if needed
     if not verify_or_fetch_arrival_notice(page, job):
         return
 
+    # 2. Check if Delivery order is ALREADY uploaded on Shypple Documents tab
+    set_job_status(job, "processing", phase="Checking Documents tab for existing Delivery order document")
+    if not _ensure_org_before_documents_tab(page, job):
+        return
+    open_documents_tab(page)
+    doc_rows = scrape_document_rows(page)
+    existing_do = _find_uploaded_row_for_type("Delivery order", doc_rows)
+
+    if existing_do:
+        _star_source_email(job, "yellow")
+        _mark_source_email_read(job)
+        set_job_status(
+            job, "lcl_done",
+            phase="The document was already uploaded, don't need to upload",
+            reason="The document was already uploaded, don't need to upload",
+        )
+        log_job(job, f"Delivery order document ('{existing_do.get('filename')}') was already uploaded on Shypple. No need to upload.")
+        return
+
+    # 3. Containers tab check
     set_job_status(job, "processing", phase="Checking Containers tab")
     current = check_container_tab_data(page)
     with STATE_LOCK:
         job["container_tab_check"] = current
-
-    # New manual-verification requirement (in addition to the Containers tab check
-    # above, unchanged): also read the Edit tab's Preceding Customs Number and
-    # Discharge CFS - same selectors edit_preceding_customs_and_cfs uses to WRITE
-    # these fields for Arrival Notice, reused here read-only. This is purely
-    # informational for the operator's confirmation below - it does not gate the
-    # container/devanning-date check just below, which is unchanged.
-    set_job_status(job, "processing", phase="Checking Edit tab (customs number & discharge CFS)")
-    edit_check = check_edit_tab_customs_and_cfs(page)
-    with STATE_LOCK:
-        job["edit_tab_check"] = edit_check
-    # check_edit_tab_customs_and_cfs navigated to the shipment's /edit page to read
-    # these fields (no form submit) - return to the main shipment page (tab bar) before
-    # anything below that needs it (open_documents_tab after confirmation).
-    if job.get("shipment_path"):
-        _safe_goto(page, SHYPPLE_ADMIN_BASE + job["shipment_path"])
-
-    _open_confirmation_gate()
-    set_job_status(
-        job, "awaiting_lcl_delivery_confirmation",
-        phase="Waiting for confirmation - verify container/devanning date (Containers tab) and "
-              "customs number/discharge CFS (Edit tab) are already set",
-        container_tab_preview=current,
-        edit_tab_preview=edit_check,
-    )
-    log_job(job, f"Containers tab currently shows: {current}. Edit tab currently shows: {edit_check}. "
-                 "Waiting for confirmation before moving to Documents.")
-    if not _wait_for_confirmation(job):
-        set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
-        log_job(job, "Skipped by operator - left as-is.")
-        return
 
     if not (current.get("has_container") and current.get("has_devanning_date")):
         set_job_status(
@@ -2495,15 +2717,16 @@ def handle_delivery_order(page, job):
         log_job(job, "Container tab is incomplete - not uploading the Delivery order yet.")
         return
 
+    # 4. Fetch email attachment for Delivery order
     set_job_status(job, "processing", phase="Preparing Delivery order document upload")
     file_bytes, file_mime, filename, fetch_error = _fetch_email_document(
         job["message_id"], "Delivery order", subject=job.get("subject", ""), label=_LCL_LABEL_KEY
     )
     if file_bytes is None:
-        log_job(job, f"Could not fetch the Delivery order attachment ({fetch_error}) - marking unread + "
+        log_job(job, f"Could not fetch the Delivery order attachment ({fetch_error}) - marking read + "
                      "yellow star anyway so it isn't lost, but this needs a manual look.")
         _star_source_email(job, "yellow")
-        _mark_source_email_unread(job)
+        _mark_source_email_read(job)
         set_job_status(job, "lcl_no_document_found",
                        reason=f"Could not fetch the Delivery order attachment: {fetch_error}")
         return
@@ -2513,6 +2736,8 @@ def handle_delivery_order(page, job):
     container_number = current.get("container_number")
     if not _ensure_org_before_documents_tab(page, job):
         return
+
+    # 5. Fill and submit Delivery order document form directly (single manual verification rule)
     open_documents_tab(page)
     fill_result = fill_shipment_document_form(
         page, "Delivery order", file_bytes, file_mime, filename,
@@ -2523,22 +2748,6 @@ def handle_delivery_order(page, job):
         log_job(job, f"Failed to prepare the Delivery order upload: {fill_result.get('error')}")
         return
 
-    _open_confirmation_gate()
-    set_job_status(
-        job, "awaiting_lcl_submit_confirmation",
-        phase="Waiting for confirmation to submit the Delivery order document",
-        submit_preview={
-            "filename": fill_result.get("filename"), "matched_type": fill_result.get("matched_type"),
-            "containers": fill_result.get("picked_containers"),
-        },
-    )
-    log_job(job, f"Form filled for Delivery order (file: {filename}, container: {container_number}). "
-                 "Waiting for confirmation before submitting.")
-    if not _wait_for_confirmation(job):
-        set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
-        log_job(job, "Skipped by operator - Delivery order was NOT submitted.")
-        return
-
     set_job_status(job, "processing", phase="Submitting Delivery order document")
     submit_result = submit_shipment_document_form(page)
     if not submit_result.get("success"):
@@ -2547,6 +2756,48 @@ def handle_delivery_order(page, job):
         return
 
     log_job(job, "Delivery order uploaded successfully.")
+
+    extra_indices = job.get("extra_doc_attachment_indices") or []
+    for extra_i, attachment_index in enumerate(extra_indices, 1):
+        total_extra = len(extra_indices)
+        set_job_status(job, "processing",
+                       phase=f"Preparing additional Delivery order document {extra_i}/{total_extra}")
+        extra_bytes, extra_mime, extra_filename, extra_fetch_error = _fetch_email_document(
+            job["message_id"], "Delivery order", subject=job.get("subject", ""),
+            attachment_index=attachment_index, label=_LCL_LABEL_KEY,
+        )
+        if extra_bytes is None:
+            log_job(job, f"Could not fetch additional Delivery order document {extra_i}/{total_extra} "
+                         f"(attachment_index={attachment_index}): {extra_fetch_error} - skipping it.")
+            continue
+
+        _save_mail_document_locally(job, "Delivery order", extra_bytes, extra_filename)
+
+        if not _ensure_org_before_documents_tab(page, job):
+            log_job(job, f"Skipping additional Delivery order document {extra_i}/{total_extra} - "
+                         "could not verify/switch the Shypple organization.")
+            continue
+        open_documents_tab(page)
+        extra_fill_result = fill_shipment_document_form(
+            page, "Delivery order", extra_bytes, extra_mime, extra_filename,
+            [container_number] if container_number else [], None,
+        )
+        if not extra_fill_result.get("success"):
+            log_job(job, f"Could not prepare additional Delivery order document {extra_i}/{total_extra} "
+                         f"upload: {extra_fill_result.get('error')} - skipping it.")
+            continue
+
+        set_job_status(job, "processing", phase=f"Submitting additional Delivery order document {extra_i}/{total_extra}")
+        extra_submit_result = submit_shipment_document_form(page)
+        if not extra_submit_result.get("success"):
+            log_job(job, f"Failed to submit additional Delivery order document {extra_i}/{total_extra}: {extra_submit_result.get('error')}")
+            continue
+
+        log_job(job, f"Additional Delivery order document {extra_i}/{total_extra} uploaded successfully.")
+
+    _mark_source_email_unread(job)
+    _star_source_email(job, "yellow")
+    set_job_status(job, "lcl_done", phase="Done - Delivery order uploaded successfully")
 
     # Per the operator's explicit rule: this mail can carry a SECOND real document
     # that also resolves to "Delivery order" on its own merit (e.g. a carrier's own
@@ -2663,9 +2914,9 @@ def process_lcl_arrival_job(page, job):
         if not info.get("isLcl"):
             reasons.append(f"load type is '{info.get('loadType') or 'unknown'}', not LCL")
         reason_str = " and ".join(reasons)
-        log_job(job, f"Shipment fails verification ({reason_str}) - marking unread + yellow star, no further action.")
+        log_job(job, f"Shipment fails verification ({reason_str}) - marking read + yellow star, no further action.")
         _star_source_email(job, "yellow")
-        _mark_source_email_unread(job)
+        _mark_source_email_read(job)
         set_job_status(job, "skipped_cluster_or_fcl", reason=reason_str)
         return
 
@@ -3022,6 +3273,15 @@ def _verify_and_upload_documents(page, job, match, containers):
         job["upload_reasons"] = needs_upload
 
     if not needs_upload:
+        # Nothing needed uploading - every extracted type was already present and
+        # verified to match content-for-content - so mark READ rather than unread
+        # (per the operator's explicit rule: unread+star means "something was
+        # actually uploaded/changed, worth a look"; read+star means "already correct,
+        # nothing happened here"). Matches LCL's own "already uploaded and identical"
+        # outcome (handle_arrival_notice/handle_delivery_order via
+        # verify_existing_document_before_upload) - both pipelines agree on this
+        # distinction. An email where a document IS actually (re-)uploaded, just
+        # below, stays unread + yellow star.
         _star_source_email(job, "yellow")
         _mark_source_email_read(job)
         set_job_status(job, "up_to_date", phase="Done - documents present and verified")
@@ -3117,11 +3377,12 @@ def _verify_and_upload_documents(page, job, match, containers):
         # Per the operator's explicit rule: every document uploaded successfully ->
         # mark the source email with a yellow star, matching this account's existing
         # "Process yellow-starred" -> "Processed - India filing" sweep, so a
-        # successfully-processed email is ready to move there - and mark it read, since
-        # it's now fully handled. Before this point (classification, verification,
-        # upload preparation) the mail is deliberately left unread - see
-        # open_gmail.py's fetch_email_body/_restore_unread - so an operator scanning
-        # the inbox can tell "still needs doing" from "done" by read state alone.
+        # successfully-processed email is ready to move there - and mark it UNREAD
+        # (this was "mark read" before; the operator reversed that rule so a
+        # successfully-processed email stays visibly flagged - unread + yellow star -
+        # instead of disappearing into the read state). Matches the LCL Arrivals/
+        # Release pipeline's already-existing unread+star terminal rule (see the
+        # comment above handle_delay_or_devanning) - both pipelines now agree.
         _star_source_email(job, "yellow")
         _mark_source_email_read(job)
         set_job_status(job, "uploaded", phase="Done - all document(s) uploaded")
@@ -3167,8 +3428,21 @@ def run_batch(page, jobs, email, password):
             continue
         with STATE_LOCK:
             batch_state["current_index"] = idx
+        job_is_lcl = job.get("flow") == "lcl_arrivals"
+        # Defensive guard: this instance is dedicated to one role (see main()'s
+        # --role) - a job for the other pipeline landing here means a stale or
+        # misconfigured caller, not a job this browser/org context is set up for.
+        if job_is_lcl != (CURRENT_ROLE == "lcl"):
+            set_job_status(
+                job, "error",
+                error=f"This Shypple browser instance is running as role='{CURRENT_ROLE}' and "
+                      f"cannot process a {'LCL' if job_is_lcl else 'CMR'} job - it was routed here "
+                      f"by mistake.",
+            )
+            log_job(job, f"Skipped: wrong role for this instance (role={CURRENT_ROLE}).")
+            continue
         try:
-            if job.get("flow") == "lcl_arrivals":
+            if job_is_lcl:
                 process_lcl_arrival_job(page, job)
             else:
                 process_one_job(page, job)
@@ -3306,24 +3580,57 @@ class ControlServer(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def start_http_server():
-    server = HTTPServer(("127.0.0.1", 40006), ControlServer)
-    print("Shypple control server running on http://127.0.0.1:40006")
+def start_http_server(port):
+    server = HTTPServer(("127.0.0.1", port), ControlServer)
+    print(f"Shypple control server running on http://127.0.0.1:{port}")
     server.serve_forever()
 
 
+def _seed_lcl_storage_state(role, user_data_dir):
+    """First-run convenience only: if this is a brand-new LCL profile (never
+    launched before) and the CMR profile already has a saved login
+    (_save_shypple_session_tokens writes data/shypple_profile/storage_state.json on
+    every successful login/org-switch), seed the new profile with that session."""
+    if role != "lcl" or os.path.exists(user_data_dir):
+        return
+    cmr_storage_state = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "data", "shypple_profile", "storage_state.json")
+    )
+    if os.path.exists(cmr_storage_state):
+        try:
+            os.makedirs(user_data_dir, exist_ok=True)
+            target = os.path.join(user_data_dir, "storage_state.json")
+            shutil.copy2(cmr_storage_state, target)
+            print(f"[Shypple] Seeded new LCL profile's login session to: {target}")
+        except Exception as e:
+            print(f"[Shypple] Could not seed storage state: {e}")
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--role", choices=list(ROLE_CONFIG.keys()), default="cmr",
+                         help="Which pipeline this instance serves - determines its "
+                              "control-server port and Chrome profile so CMR and LCL "
+                              "can each run their own independent Shypple browser.")
+    args = parser.parse_args()
+
+    global CURRENT_ROLE
+    CURRENT_ROLE = args.role
+    role_cfg = ROLE_CONFIG[CURRENT_ROLE]
+    port = role_cfg["port"]
+
     email = os.environ.get("SHYPPLE_EMAIL", "")
     password = os.environ.get("SHYPPLE_PASSWORD", "")
     if not email or not password:
         print("[Shypple] WARNING: SHYPPLE_EMAIL / SHYPPLE_PASSWORD not set - login will be skipped.")
 
-    user_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "shypple_profile"))
+    user_data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", role_cfg["profile_dir"]))
+    _seed_lcl_storage_state(CURRENT_ROLE, user_data_dir)
     os.makedirs(user_data_dir, exist_ok=True)
 
-    threading.Thread(target=start_http_server, daemon=True).start()
+    threading.Thread(target=start_http_server, args=(port,), daemon=True).start()
 
-    print(f"Launching Playwright with persistent context in: {user_data_dir}")
+    print(f"[Shypple] role={CURRENT_ROLE} - launching Playwright with persistent context in: {user_data_dir}")
     with sync_playwright() as p:
         try:
             context = p.chromium.launch_persistent_context(
@@ -3344,6 +3651,11 @@ def main():
 
         page = context.pages[0] if context.pages else context.new_page()
         print("Shypple automation browser window opened. Feel free to log in manually if prompted.")
+        try:
+            if page.url == "about:blank":
+                page.goto(SHYPPLE_LOGIN_URL, timeout=30000)
+        except Exception as e:
+            print(f"[Shypple] Could not load initial Shypple URL: {e}")
 
         try:
             while len(context.pages) > 0:

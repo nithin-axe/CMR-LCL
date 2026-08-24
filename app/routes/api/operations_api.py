@@ -22,8 +22,25 @@ from app.utils.system_paths import get_downloads_dir
 operations_api_bp = Blueprint("operations_api", __name__)
 
 # The Shypple automation browser (scripts/shypple_process.py) runs its own HTTP control
-# server on this port, mirroring how scripts/open_gmail.py exposes one on 40005.
-_CONTROL_SERVER = "http://127.0.0.1:40006"
+# server, mirroring how scripts/open_gmail.py exposes one on 40005. Two independent
+# instances now run side by side - one dedicated to the CMR pipeline, one to the LCL
+# Arrivals/Release pipeline (see that script's --role/ROLE_CONFIG) - so a batch on one
+# never has to wait on the other. Every caller below takes a `role` ("cmr"/"lcl",
+# defaulting to "cmr") and routes to the matching control server via _control_server().
+_CONTROL_SERVERS = {"cmr": "http://127.0.0.1:40006", "lcl": "http://127.0.0.1:40007"}
+
+
+def _control_server(role):
+    return _CONTROL_SERVERS.get(role, _CONTROL_SERVERS["cmr"])
+
+
+def _role_for_jobs(jobs):
+    """Batches are homogeneous per submission (processSelectedMails never sets
+    job.flow; processLclSelectedMails always sets flow="lcl_arrivals" - see
+    dashboard.html) - infer which instance a batch belongs to from its first job."""
+    if jobs and jobs[0].get("flow") == "lcl_arrivals":
+        return "lcl"
+    return "cmr"
 
 # scripts/open_gmail.py's own control server (a separate automation browser).
 _GMAIL_CONTROL_SERVER = "http://127.0.0.1:40005"
@@ -71,41 +88,43 @@ _DOWNLOADS_DIR = get_downloads_dir()
 
 # Cold-starting the persistent Chrome profile (first launch, or after a machine reboot)
 # can take a while - guards against two near-simultaneous requests (e.g. a double click
-# on Process) both spawning their own browser instance.
-_LAUNCH_LOCK = threading.Lock()
+# on Process) both spawning their own browser instance. One lock per role so launching
+# CMR's browser never has to wait on LCL's launch (or vice versa).
+_LAUNCH_LOCKS = {"cmr": threading.Lock(), "lcl": threading.Lock()}
 
 
-def _control_server_reachable(timeout=2):
+def _control_server_reachable(role, timeout=2):
     try:
-        with urllib.request.urlopen(f"{_CONTROL_SERVER}/status", timeout=timeout):
+        with urllib.request.urlopen(f"{_control_server(role)}/status", timeout=timeout):
             return True
     except Exception:
         return False
 
 
-def _ensure_shypple_browser_running(timeout_s=45):
-    """Launch scripts/shypple_process.py if its control server isn't reachable yet, and
-    wait (polling) for it to come up - Playwright's first Chrome launch on a persistent
-    profile can take several seconds, and this is what previously caused "connection
-    actively refused" errors when Process was clicked before/without a separate manual
-    Launch step. Returns True once reachable, False on timeout."""
-    if _control_server_reachable():
+def _ensure_shypple_browser_running(role, timeout_s=45):
+    """Launch scripts/shypple_process.py (with --role) if that role's control server
+    isn't reachable yet, and wait (polling) for it to come up - Playwright's first
+    Chrome launch on a persistent profile can take several seconds, and this is what
+    previously caused "connection actively refused" errors when Process was clicked
+    before/without a separate manual Launch step. Returns True once reachable, False
+    on timeout."""
+    if _control_server_reachable(role):
         return True
 
-    with _LAUNCH_LOCK:
-        if _control_server_reachable():  # re-check - another request may have launched it
+    with _LAUNCH_LOCKS.get(role, _LAUNCH_LOCKS["cmr"]):
+        if _control_server_reachable(role):  # re-check - another request may have launched it
             return True
         python_exe = sys.executable
         script_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "shypple_process.py")
         )
-        subprocess.Popen([python_exe, script_path])
+        subprocess.Popen([python_exe, script_path, "--role", role])
 
     waited = 0
     while waited < timeout_s:
         time.sleep(1)
         waited += 1
-        if _control_server_reachable():
+        if _control_server_reachable(role):
             return True
     return False
 
@@ -146,11 +165,13 @@ def _subject_by_id():
 
 @operations_api_bp.route("/operations/launch", methods=["POST"])
 def launch_operations():
+    data = request.get_json(silent=True) or {}
+    role = data.get("role") or "cmr"
     try:
-        if _control_server_reachable():
-            return jsonify({"success": True, "message": "Shypple automation browser is already running."})
-        if _ensure_shypple_browser_running(timeout_s=45):
-            return jsonify({"success": True, "message": "Shypple automation browser launched."})
+        if _control_server_reachable(role):
+            return jsonify({"success": True, "message": f"Shypple automation browser ({role}) is already running."})
+        if _ensure_shypple_browser_running(role, timeout_s=45):
+            return jsonify({"success": True, "message": f"Shypple automation browser ({role}) launched."})
         return jsonify({
             "success": False,
             "error": "Timed out waiting for the Shypple automation browser to start (45s).",
@@ -559,42 +580,66 @@ def lcl_arrivals_process():
             sf_number = full_text_sf
             res_entry["sf_number"] = sf_number
 
-        extracted = extract_lcl_arrival_data(text_for_extraction)
+        if mail_type == "delivery_order":
+            # Per the operator's explicit rule: a Delivery Order's own document is
+            # never the source for container/devanning/customs/CFS data - those get
+            # verified live against Shypple instead once the browser opens (Containers
+            # tab for container number + devanning date, the shipment's existing
+            # Arrival Notice document for customs number + CFS - see
+            # verify_or_fetch_arrival_notice/handle_delivery_order in
+            # shypple_process.py). Deliberately skip extraction here so the review UI
+            # doesn't show misleading "extracted from this document" fields for data
+            # this document was never meant to carry.
+            extracted = {}
+        else:
+            # strict=True for an actual Arrival Notice document: restricts
+            # devanning_date/customs_number/cfs_address to the operator's exact,
+            # narrow label set and drops the unlabeled fallback scan (see
+            # extract_lcl_arrival_data's docstring) - a label that's missing or empty
+            # comes back empty, never filled in from a different label. Other mail
+            # types (e.g. delay_or_devanning) keep the original broader matching.
+            strict = mail_type == "arrival_notice"
+            extracted = extract_lcl_arrival_data(text_for_extraction, strict=strict)
 
-        # Deterministic regex-over-PDF-text-layer extraction (above) has three blind
-        # spots: a scanned/image-only document with no text layer at all (same root
-        # cause as CMR's handwritten container numbers), a real text layer whose actual
-        # label wording just doesn't match extract_lcl_arrival_data's patterns, and -
-        # confirmed on a real Arrival Notice - a 2-column table whose PDF text
-        # extraction doesn't preserve visual reading order, so a label can end up
-        # immediately next to an UNRELATED neighbouring cell's value (e.g. "Expected
-        # Devanning date" picking up the Bill of Lading Date instead; "Customs number"
-        # - genuinely blank on that document - picking up a stray "ETA" from a nearby
-        # cell). That third case produces a WRONG-BUT-PRESENT value, which a plain
-        # "only fill in what's missing" check can't catch. So whenever we have the
-        # document's real bytes, always ask Gemini to read the fields directly off the
-        # rendered page (immune to text-flattening order issues) and, for each field,
-        # prefer the LLM's answer whenever it disagrees with the regex's - trusting the
-        # page-aware read over blind proximity matching. A field the LLM couldn't find
-        # keeps the regex's value (LLM silence isn't evidence the regex was wrong).
-        if data_bytes:
-            llm_fields = extract_lcl_fields_via_llm(GeminiClient(), data_bytes, doc_mime, doc_filename or subject)
-            for k in ("container_number", "devanning_date", "customs_number", "cfs_address"):
-                llm_val = llm_fields.get(k)
-                if not llm_val:
-                    continue
-                regex_val = extracted.get(k)
-                if not regex_val:
-                    extracted[k] = llm_val
-                elif str(regex_val).strip().casefold() != str(llm_val).strip().casefold():
-                    current_app.logger.info(
-                        f"[LCL Arrivals] '{k}' regex/LLM disagreement for '{subject[:40]}': "
-                        f"regex='{regex_val}' llm='{llm_val}' - using the LLM's value."
-                    )
-                    extracted[k] = llm_val
-            if not sf_number and llm_fields.get("sf_number"):
-                sf_number = llm_fields["sf_number"]
-                res_entry["sf_number"] = sf_number
+            # Deterministic regex-over-PDF-text-layer extraction (above) has three
+            # blind spots: a scanned/image-only document with no text layer at all
+            # (same root cause as CMR's handwritten container numbers), a real text
+            # layer whose actual label wording just doesn't match
+            # extract_lcl_arrival_data's patterns, and - confirmed on a real Arrival
+            # Notice - a 2-column table whose PDF text extraction doesn't preserve
+            # visual reading order, so a label can end up immediately next to an
+            # UNRELATED neighbouring cell's value (e.g. "Expected Devanning date"
+            # picking up the Bill of Lading Date instead; "Customs number" - genuinely
+            # blank on that document - picking up a stray "ETA" from a nearby cell).
+            # That third case produces a WRONG-BUT-PRESENT value, which a plain "only
+            # fill in what's missing" check can't catch. So whenever we have the
+            # document's real bytes, always ask Gemini to read the fields directly off
+            # the rendered page (immune to text-flattening order issues) and, for each
+            # field, prefer the LLM's answer whenever it disagrees with the regex's -
+            # trusting the page-aware read over blind proximity matching. A field the
+            # LLM couldn't find keeps the regex's value (LLM silence isn't evidence
+            # the regex was wrong). strict is forwarded here too, so the LLM prompt
+            # itself is held to the same exact-label-or-empty rule.
+            if data_bytes:
+                llm_fields = extract_lcl_fields_via_llm(
+                    GeminiClient(), data_bytes, doc_mime, doc_filename or subject, strict=strict
+                )
+                for k in ("container_number", "devanning_date", "customs_number", "cfs_address"):
+                    llm_val = llm_fields.get(k)
+                    if not llm_val:
+                        continue
+                    regex_val = extracted.get(k)
+                    if not regex_val:
+                        extracted[k] = llm_val
+                    elif str(regex_val).strip().casefold() != str(llm_val).strip().casefold():
+                        current_app.logger.info(
+                            f"[LCL Arrivals] '{k}' regex/LLM disagreement for '{subject[:40]}': "
+                            f"regex='{regex_val}' llm='{llm_val}' - using the LLM's value."
+                        )
+                        extracted[k] = llm_val
+                if not sf_number and llm_fields.get("sf_number"):
+                    sf_number = llm_fields["sf_number"]
+                    res_entry["sf_number"] = sf_number
 
         res_entry["flow"] = "lcl_arrivals"
         res_entry["extracted"] = extracted
@@ -615,15 +660,18 @@ def operations_document_type_options():
     unlike our internal canonical DOCUMENT_TYPES list, which doesn't map 1:1 onto
     Shypple's exact wording (that mismatch is what caused select2 match failures).
     Falls back to our own canonical list, clearly flagged as such, only if nothing has
-    been captured from Shypple yet."""
-    try:
-        with urllib.request.urlopen(f"{_CONTROL_SERVER}/document_type_options", timeout=8) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        if result.get("success") and result.get("options"):
-            return jsonify({"success": True, "options": result["options"], "source": "shypple",
-                             "captured_at": result.get("captured_at")})
-    except Exception:
-        pass
+    been captured from Shypple yet. The cache file behind this is shared/role-agnostic
+    (same dropdown regardless of which pipeline's browser scraped it) - try the CMR
+    instance first, then fall back to LCL's, before falling back to the internal list."""
+    for role in ("cmr", "lcl"):
+        try:
+            with urllib.request.urlopen(f"{_control_server(role)}/document_type_options", timeout=8) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if result.get("success") and result.get("options"):
+                return jsonify({"success": True, "options": result["options"], "source": "shypple",
+                                 "captured_at": result.get("captured_at")})
+        except Exception:
+            continue
     return jsonify({"success": True, "options": DOCUMENT_TYPES, "source": "internal"})
 
 
@@ -631,10 +679,12 @@ def operations_document_type_options():
 def operations_refresh_document_type_options():
     """Force a fresh live scrape of Shypple's document-type dropdown (see
     shypple_process.py's _refresh_document_type_options) rather than waiting for the
-    next real upload to passively capture it. Requires the Shypple browser to already
-    be running and idle (not mid-batch)."""
+    next real upload to passively capture it. Requires that role's Shypple browser to
+    already be running and idle (not mid-batch)."""
+    data = request.get_json(silent=True) or {}
+    role = data.get("role") or "cmr"
     try:
-        req = urllib.request.Request(f"{_CONTROL_SERVER}/refresh_document_type_options", data=b"{}", method="POST")
+        req = urllib.request.Request(f"{_control_server(role)}/refresh_document_type_options", data=b"{}", method="POST")
         with urllib.request.urlopen(req, timeout=45) as response:
             result = json.loads(response.read().decode("utf-8"))
         return jsonify(result)
@@ -653,17 +703,21 @@ def operations_refresh_document_type_options():
 
 @operations_api_bp.route("/operations/start", methods=["POST"])
 def start_operations():
-    """Open (or reuse) the Shypple browser and hand it the job list the user already
-    reviewed and confirmed in the UI - this is the only path that ever opens Shypple."""
+    """Open (or reuse) the Shypple browser for this batch's pipeline and hand it the
+    job list the user already reviewed and confirmed in the UI - this is the only
+    path that ever opens Shypple. Which of the two independent instances (CMR/LCL)
+    gets it is inferred from the jobs themselves (_role_for_jobs) - a CMR batch and
+    an LCL batch never contend for the same browser/queue any more."""
     data = request.get_json() or {}
     jobs = data.get("jobs") or []
     if not jobs:
         return jsonify({"success": False, "error": "jobs is required."}), 400
+    role = _role_for_jobs(jobs)
 
-    # Auto-launch (and wait for) the Shypple automation browser if it isn't already
-    # running, instead of requiring a separate manual "Launch" click first - Playwright's
-    # cold Chrome start can take a while, hence the generous timeout here.
-    if not _ensure_shypple_browser_running(timeout_s=60):
+    # Auto-launch (and wait for) that role's Shypple automation browser if it isn't
+    # already running, instead of requiring a separate manual "Launch" click first -
+    # Playwright's cold Chrome start can take a while, hence the generous timeout here.
+    if not _ensure_shypple_browser_running(role, timeout_s=60):
         return jsonify({
             "success": False,
             "error": "The Shypple automation browser didn't start within 60s. It may still be "
@@ -673,7 +727,7 @@ def start_operations():
     try:
         body = json.dumps({"jobs": jobs}).encode("utf-8")
         req = urllib.request.Request(
-            f"{_CONTROL_SERVER}/run_batch", data=body,
+            f"{_control_server(role)}/run_batch", data=body,
             headers={"Content-Type": "application/json"}, method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -695,22 +749,29 @@ def start_operations():
 
 @operations_api_bp.route("/operations/status", methods=["GET"])
 def operations_status():
+    role = request.args.get("role") or "cmr"
     try:
-        with urllib.request.urlopen(f"{_CONTROL_SERVER}/status", timeout=10) as response:
+        with urllib.request.urlopen(f"{_control_server(role)}/status", timeout=10) as response:
             result = json.loads(response.read().decode("utf-8"))
         return jsonify(result)
     except Exception as e:
+        err_msg = str(e)
+        if "WinError 10061" in err_msg or "refused" in err_msg or "URLError" in err_msg:
+            clean_err = "Shypple automation browser is not running."
+        else:
+            clean_err = f"Shypple automation browser is not running: {err_msg}"
         return jsonify({
             "success": False,
-            "error": f"Shypple automation browser is not running: {e}",
+            "error": clean_err,
         }), 500
 
 
 @operations_api_bp.route("/operations/proceed", methods=["POST"])
 def operations_proceed():
+    role = request.args.get("role") or "cmr"
     try:
         req = urllib.request.Request(
-            f"{_CONTROL_SERVER}/proceed", data=b"{}",
+            f"{_control_server(role)}/proceed", data=b"{}",
             headers={"Content-Type": "application/json"}, method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -728,9 +789,10 @@ def operations_skip():
     """Drop the currently-paused job (whichever confirmation gate it's stuck at)
     without performing its pending action, so the batch moves on to the next job
     instead of the operator being forced to either confirm it or relaunch Shypple."""
+    role = request.args.get("role") or "cmr"
     try:
         req = urllib.request.Request(
-            f"{_CONTROL_SERVER}/skip", data=b"{}",
+            f"{_control_server(role)}/skip", data=b"{}",
             headers={"Content-Type": "application/json"}, method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -1013,12 +1075,20 @@ def operations_compare_document():
     """Compare the email's version of ``doc_type`` for ``message_id`` against a file the
     caller already downloaded from Shypple (base64), using Gemini to judge whether
     they're the same document or materially different - see
-    document_classifier.compare_document_versions for the actual logic."""
+    document_classifier.compare_document_versions for the actual logic.
+
+    ``label`` (default "a-cmr") is forwarded to fetch_document_bytes' own
+    force-reclassify retry - an LCL caller (scripts/shypple_process.py's
+    verify_existing_document_before_upload, used by the Delivery Order/Arrival Notice
+    LCL handlers) MUST pass label="lcl-arrivals---release", or a retry on an LCL mail
+    could corrupt its classification under the CMR Cmr/Other override rule (same
+    warning as _fetch_email_document's docstring)."""
     data = request.get_json(silent=True) or {}
     message_id = data.get("message_id", "")
     doc_type = data.get("doc_type", "")
     subject = data.get("subject", "")
     attachment_index = data.get("attachment_index")
+    label = data.get("label") or "a-cmr"
     other_b64 = data.get("other_file_base64", "")
     other_mime = data.get("other_mime", "") or "application/pdf"
     if not message_id or not doc_type or not other_b64:
@@ -1033,7 +1103,7 @@ def operations_compare_document():
         return jsonify({"success": False, "error": f"Could not decode other_file_base64: {e}"}), 400
 
     email_bytes, email_mime, _ = fetch_document_bytes(
-        message_id, doc_type, subject=subject, attachment_index=attachment_index
+        message_id, doc_type, subject=subject, attachment_index=attachment_index, label=label
     )
     if email_bytes is None:
         return jsonify({
@@ -1054,7 +1124,11 @@ def operations_extract_lcl_fields_from_bytes():
     Order -> Arrival Notice cross-verification flow (scripts/shypple_process.py) for
     a document already downloaded from Shypple's own Documents tab, mirroring how
     /operations/compare_document takes an already-downloaded file's bytes rather than
-    fetching them itself."""
+    fetching them itself. Always strict=True - every document this route is ever
+    handed genuinely IS an Arrival Notice, so devanning_date/customs_number/
+    cfs_address are restricted to the exact label set a real one uses (see
+    extract_lcl_arrival_data's strict param) - a label that's missing or empty comes
+    back empty, never filled in from a different label."""
     data = request.get_json(silent=True) or {}
     file_b64 = data.get("file_base64", "")
     mime = data.get("mime", "") or "application/pdf"
@@ -1067,5 +1141,5 @@ def operations_extract_lcl_fields_from_bytes():
     except Exception as e:
         return jsonify({"success": False, "error": f"Could not decode file_base64: {e}"}), 400
 
-    extracted = extract_lcl_fields_from_bytes(file_bytes, mime, filename)
+    extracted = extract_lcl_fields_from_bytes(file_bytes, mime, filename, strict=True)
     return jsonify({"success": True, "extracted": extracted})

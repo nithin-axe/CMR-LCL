@@ -1779,6 +1779,11 @@ def _normalize_date_str(raw):
 # unpacked/stripping date can be printed in email text or attached documents.
 # Strictly requires an explicit label so unrelated dates (such as vessel ETA, ATA,
 # or document issue date) are NOT mistakenly grabbed when no devanning date exists.
+# Deliberately kept broad - used as the default (strict=False) for LCL document types
+# OTHER than an actual Arrival Notice, e.g. delay_or_devanning notices, which use
+# different real-world phrasing that was broadened over several bug fixes. An actual
+# Arrival Notice document uses _ARRIVAL_NOTICE_DEVANNING_LABEL_RE instead (strict=True
+# below) - a narrower, EXACT label set per the operator's explicit instruction.
 _DEVANNING_DATE_LABEL_RE = re.compile(
     r"(?:"
     r"expected\s+devanning\s+date|devan(?:ning|ing|aing|ing)?\s+date|devan(?:ning|ing|aing|ing)?"
@@ -1790,14 +1795,67 @@ _DEVANNING_DATE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Non-strict (default) label patterns for customs number / CFS address - broad,
+# multi-variant, with a document-wide unlabeled fallback scan for customs_number (see
+# extract_lcl_arrival_data). Kept for delay_or_devanning and other non-Arrival-Notice
+# LCL documents.
+_CUSTOMS_NUMBER_LABEL_RE = re.compile(
+    r"(?:customs\s*number|previous\s*customs?\s*number|preceding\s*customs?\s*number|customs\s*no\.?|customs\s*ref(?:erence)?)[:\s]*([A-Z0-9\-_/]{3,35})",
+    re.IGNORECASE,
+)
+_CFS_ADDRESS_LABEL_RE = re.compile(r"(?:cfs\s*address|warehouse|discharge\s*cfs)[:\s]*([^\r\n<]{1,80})", re.IGNORECASE)
 
-def extract_lcl_arrival_data(text):
+# Strict, EXACT label set used ONLY when the source document genuinely IS an Arrival
+# Notice (strict=True in extract_lcl_arrival_data / extract_lcl_fields_via_llm /
+# extract_lcl_fields_from_bytes below) - per the operator's explicit instruction:
+# match only these exact label phrasings, and if the label isn't found (or is found
+# with nothing filled in after it), that field comes back empty - never fall back to
+# a different label or an unlabeled document-wide scan.
+# Strict, EXACT label set used ONLY when the source document genuinely IS an Arrival
+# Notice (strict=True in extract_lcl_arrival_data / extract_lcl_fields_via_llm /
+# extract_lcl_fields_from_bytes below) - per the operator's explicit instruction:
+# match only these exact label phrasings, and if the label isn't found (or is found
+# with nothing filled in after it), that field comes back empty - never fall back to
+# a different label or an unlabeled document-wide scan.
+_ARRIVAL_NOTICE_DEVANNING_LABEL_RE = re.compile(
+    r"(?:expected\s+(?:devan{1,2}ing|devaing)\s+(?:date|data)?|available\s+(?:date|data)?\s+at\s+cfs)"
+    r"[\s\:\=]*[^\r\n]{0,50}?\b([0-9]{1,4}[-/.\s][0-9A-Za-z]{1,9}(?:[-/.\s][0-9]{2,4})?)\b",
+    re.IGNORECASE,
+)
+_ARRIVAL_NOTICE_CUSTOMS_LABEL_RE = re.compile(
+    r"(?:customs\s*number|customs\s*no\.?|previous\s*(?:customs?|customer|cutomer)\s*number|preceding\s*customs?\s*number)[:\s]*([A-Z0-9\-_/]{3,35})",
+    re.IGNORECASE,
+)
+# CFS Address / Warehouse - only the FIRST LINE of the address (e.g. "VLS BELGIUM"),
+# per the operator's explicit request: the Shypple side only ever needs the first 3
+# letters of this (see edit_preceding_customs_and_cfs's prefix match), and the
+# warehouse block on a real Arrival Notice runs on for several more lines of
+# operational detail (opening hours, reception email, entrepot number, etc.) that
+# must NOT end up in this field.
+_ARRIVAL_NOTICE_CFS_LABEL_RE = re.compile(
+    r"(?:warehouse|warechouse|cfs\s*address|cfs|discharge\s*cfs)[:\s]*([^\r\n<]{1,80})",
+    re.IGNORECASE,
+)
+
+
+
+def extract_lcl_arrival_data(text, strict=False):
     """Extract data fields required for LCL Arrivals:
     - container_number (ISO 6346)
     - devanning_date / available date at cfs (YYYY-MM-DD)
     - customs_number (preceding customs number, e.g., 641761FPS-01)
     - cfs_address / warehouse (e.g. CTG Logistics)
-    """
+
+    strict=True is used whenever the source document genuinely IS an Arrival Notice
+    (the arrival_notice email's own attachment in lcl_arrivals_process, or one
+    downloaded from Shypple's Documents tab for the Delivery Order -> Arrival Notice
+    cross-verification - see extract_lcl_fields_from_bytes): restricts
+    devanning_date/customs_number/cfs_address to the narrow _ARRIVAL_NOTICE_*_LABEL_RE
+    patterns and drops the unlabeled document-wide customs-number fallback scan below
+    entirely - a label that's missing or present-but-empty must come back empty for
+    that field, never filled in from a different label. strict=False (default) keeps
+    the original, broader matching for other LCL document types (e.g.
+    delay_or_devanning notices, which use different real-world label phrasing)."""
     if not text:
         return {}
 
@@ -1805,11 +1863,42 @@ def extract_lcl_arrival_data(text):
     container_number = containers[0] if containers else None
 
     # Date extraction: ONLY extract a date if it is explicitly labeled as a
-    # devanning, available, or delay date via _DEVANNING_DATE_LABEL_RE.
-    # We deliberately do NOT fall back to bare/unlabeled date scans in the document
-    # because that would mistakenly grab unrelated dates like vessel ETA or issue date.
-    label_match = _DEVANNING_DATE_LABEL_RE.search(text)
+    # devanning, available, or delay date. We deliberately do NOT fall back to bare/
+    # unlabeled date scans in the document because that would mistakenly grab
+    # unrelated dates like vessel ETA or issue date.
+    devanning_re = _ARRIVAL_NOTICE_DEVANNING_LABEL_RE if strict else _DEVANNING_DATE_LABEL_RE
+    label_match = devanning_re.search(text)
     devanning_date = _normalize_date_str(label_match.group(1)) if label_match else None
+
+    customs_re = _ARRIVAL_NOTICE_CUSTOMS_LABEL_RE if strict else _CUSTOMS_NUMBER_LABEL_RE
+    customs_match = customs_re.search(text)
+    customs_number = None
+    if customs_match:
+        candidate = customs_match.group(1).strip()
+        if _is_valid_customs_number(candidate):
+            customs_number = candidate
+
+    if not strict and not customs_number:
+        # Check standard preceding customs number formats (e.g. 641761FPS-01),
+        # unanchored to any label. Non-strict only - strict mode never guesses a
+        # value that wasn't found under one of its two named labels.
+        for match in re.finditer(r"\b(\d{5,}[A-Z0-9\-_]{2,})\b", text):
+            cand = match.group(1).strip()
+            if _is_valid_customs_number(cand):
+                customs_number = cand
+                break
+
+    cfs_re = _ARRIVAL_NOTICE_CFS_LABEL_RE if strict else _CFS_ADDRESS_LABEL_RE
+    cfs_match = cfs_re.search(text)
+    cfs_address = cfs_match.group(1).strip() if cfs_match else None
+
+    return {
+        "container_number": container_number,
+        "devanning_date": devanning_date,
+        "customs_number": customs_number,
+        "cfs_address": cfs_address,
+    }
+
 
 _INVALID_CUSTOMS_WORDS_RE = re.compile(
     r"\b(?:"
@@ -1843,100 +1932,46 @@ def _is_valid_customs_number(candidate):
     return True
 
 
-def extract_lcl_arrival_data(text):
-    """Extract data fields required for LCL Arrivals:
-    - container_number (ISO 6346)
-    - devanning_date / available date at cfs (YYYY-MM-DD)
-    - customs_number (preceding customs number, e.g., 641761FPS-01)
-    - cfs_address / warehouse (e.g. CTG Logistics)
-    """
-    if not text:
-        return {}
-
-    containers = find_container_numbers(text)
-    container_number = containers[0] if containers else None
-
-    # Date extraction: ONLY extract a date if it is explicitly labeled as a
-    # devanning, available, or delay date via _DEVANNING_DATE_LABEL_RE.
-    # We deliberately do NOT fall back to bare/unlabeled date scans in the document
-    # because that would mistakenly grab unrelated dates like vessel ETA or issue date.
-    label_match = _DEVANNING_DATE_LABEL_RE.search(text)
-    devanning_date = _normalize_date_str(label_match.group(1)) if label_match else None
-
-    # Customs number match (e.g. 641761FPS-01 or Customs Number label).
-    customs_match = re.search(
-        r"(?:customs\s*number|previous\s*customs?\s*number|preceding\s*customs?\s*number|customs\s*no\.?|customs\s*ref(?:erence)?)[:\s]*([A-Z0-9\-_/]{3,35})",
-        text, re.IGNORECASE
-    )
-    customs_number = None
-    if customs_match:
-        candidate = customs_match.group(1).strip()
-        if _is_valid_customs_number(candidate):
-            customs_number = candidate
-
-    if not customs_number:
-        # Check standard preceding customs number formats (e.g. 641761FPS-01)
-        for match in re.finditer(r"\b(\d{5,}[A-Z0-9\-_]{2,})\b", text):
-            cand = match.group(1).strip()
-            if _is_valid_customs_number(cand):
-                customs_number = cand
-                break
-
-    # CFS Address / Warehouse - only the FIRST LINE of the address (e.g. "VLS
-    # BELGIUM"), per the operator's explicit request: the Shypple side only ever needs
-    # the first 3 letters of this (see edit_preceding_customs_and_cfs's prefix match
-    # just below), and the warehouse block on a real Arrival Notice runs on for
-    # several more lines of operational detail (opening hours, reception email,
-    # entrepot number, etc.) that must NOT end up in this field. The old unbounded
-    # `[^\r\n]+` swallowed that whole block on a real document whose PDF text has no
-    # real newlines between address lines - some of these are HTML-to-PDF exports that
-    # bake "<br>" in as literal visible text instead of an actual line break (confirmed
-    # live: "Warehouse:VLS BELGIUM<br>ROMEYNSWEEL 8<br>HAVENNUMMER: ..."). Excluding
-    # "<" from the captured class stops at that literal tag; the 80-char cap is a
-    # last-resort safety net for a genuinely run-on block with neither a real newline
-    # nor a "<br>" anywhere.
-    cfs_match = re.search(r"(?:cfs\s*address|warehouse|discharge\s*cfs)[:\s]*([^\r\n<]{1,80})", text, re.IGNORECASE)
-    cfs_address = cfs_match.group(1).strip() if cfs_match else None
-
-    return {
-        "container_number": container_number,
-        "devanning_date": devanning_date,
-        "customs_number": customs_number,
-        "cfs_address": cfs_address,
-    }
-
-
-def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename):
+def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename, strict=False):
     """Read the LCL Arrivals fields (plus the SF number) directly off a document's
     actual bytes via Gemini multimodal - fallback for when extract_lcl_arrival_data's
-    deterministic regex pass over the PDF's text layer comes up empty or incomplete.
-    Two distinct failure modes land here: a scanned/image-only document with no
-    extractable text layer at all (same root cause as CMR's handwritten containers -
-    see _extract_containers_via_llm), or a real text layer whose actual label wording
-    just doesn't match extract_lcl_arrival_data's patterns (a carrier/template this
-    pipeline hasn't seen the exact phrasing of yet). Best-effort only; returns {} on
-    any failure or on a non-multimodal-readable file, never raises."""
+    deterministic regex pass over the PDF's text layer comes up empty or incomplete."""
     if not data_bytes or not (mime or "").startswith(_LLM_READABLE_PREFIXES) or len(data_bytes) > 18 * 1024 * 1024:
         return {}
-    prompt = (
-        "This is an LCL (less-than-container-load) Arrival Notice or Delay / Devanning "
-        "document. Read it carefully - including any handwritten or stamped text - and "
-        "extract the following fields, using null for anything genuinely not present:\n"
-        "- sf_number: a reference starting with \"SF\" followed by digits (e.g. SF169508)\n"
-        "- container_number: an ISO-6346 container number (4 letters + 7 digits, e.g. TEMU9681744)\n"
-        "- devanning_date: the specific devanning date, available date at CFS, or delayed devanning date "
-        "(respond as YYYY-MM-DD). IMPORTANT: Do NOT use the vessel ETA (Estimated Time of Arrival) or document issue date as the devanning date. If there is no specific devanning, available, or delay date present, return null.\n"
-        "- customs_number: the value under a label like \"Customs Number\" or "
-        "\"Preceding/Previous Customs Number\" (e.g. 641761FPS-01). IMPORTANT: Do NOT return a vessel name, voyage number, ETA, \"N/A\", \"TBD\", \"available after devanning\", or any adjacent label if the customs number field is blank or missing. Return null if not present.\n"
-        "- cfs_address: ONLY the short warehouse/city name on the FIRST line under a "
-        "label like \"CFS Address\", \"Warehouse\", or \"Discharge CFS\" (e.g. \"VLS "
-        "BELGIUM\") - do NOT include the street address, opening hours, contact "
-        "emails, reference/entrepot numbers, or any other operational detail that "
-        "follows it in that same block\n\n"
-        "Respond with ONLY a JSON object, no markdown fences:\n"
-        '{"sf_number": "...", "container_number": "...", "devanning_date": "...", '
-        '"customs_number": "...", "cfs_address": "..."}'
-    )
+    if strict:
+        prompt = (
+            "This is an LCL Arrival Notice document. Extract ONLY the specified fields based STRICTLY on the labels defined below. "
+            "If an exact label is missing or has no data under it, return null for that field - do NOT extract data from any other label or text.\n"
+            "- container_number: an ISO-6346 container number (4 letters + 7 digits, e.g. TEMU9681744) from the document\n"
+            "- devanning_date: the date under the label \"Expected Devanning Date\" (or \"Expected Devanning Data\", \"Expected Devaing Data\") "
+            "or \"Available Date at CFS\" (or \"Available Data at CFS\") ONLY (respond as YYYY-MM-DD). Return null if no value is present under these exact labels.\n"
+            "- customs_number: the value under the label \"Customs Number\" (or \"Customs No\") or "
+            "\"Previous Customs Number\" (or \"Previous Customer Number\", \"Previous Cutomer Number\", \"Preceding Customs Number\") ONLY (e.g. 641761FPS-01). Return null if no value is present under these exact labels.\n"
+            "- cfs_address: ONLY the short warehouse/city name on the FIRST line under the "
+            "label \"Warehouse\" (or \"Warechouse\"), \"CFS Address\", \"CFS\", or \"Discharge CFS\" ONLY (e.g. \"VLS BELGIUM\"). Return null if no value is present under these exact labels.\n\n"
+            "Respond with ONLY a JSON object, no markdown fences:\n"
+            '{"container_number": "...", "devanning_date": "...", "customs_number": "...", "cfs_address": "..."}'
+        )
+    else:
+        prompt = (
+            "This is an LCL (less-than-container-load) Arrival Notice or Delay / Devanning "
+            "document. Read it carefully - including any handwritten or stamped text - and "
+            "extract the following fields, using null for anything genuinely not present:\n"
+            "- sf_number: a reference starting with \"SF\" followed by digits (e.g. SF169508)\n"
+            "- container_number: an ISO-6346 container number (4 letters + 7 digits, e.g. TEMU9681744)\n"
+            "- devanning_date: the specific devanning date, available date at CFS, or delayed devanning date "
+            "(respond as YYYY-MM-DD). IMPORTANT: Do NOT use the vessel ETA (Estimated Time of Arrival) or document issue date as the devanning date. If there is no specific devanning, available, or delay date present, return null.\n"
+            "- customs_number: the value under a label like \"Customs Number\" or "
+            "\"Preceding/Previous Customs Number\" (e.g. 641761FPS-01). IMPORTANT: Do NOT return a vessel name, voyage number, ETA, \"N/A\", \"TBD\", \"available after devanning\", or any adjacent label if the customs number field is blank or missing. Return null if not present.\n"
+            "- cfs_address: ONLY the short warehouse/city name on the FIRST line under a "
+            "label like \"CFS Address\", \"Warehouse\", or \"Discharge CFS\" (e.g. \"VLS "
+            "BELGIUM\") - do NOT include the street address, opening hours, contact "
+            "emails, reference/entrepot numbers, or any other operational detail that "
+            "follows it in that same block\n\n"
+            "Respond with ONLY a JSON object, no markdown fences:\n"
+            '{"sf_number": "...", "container_number": "...", "devanning_date": "...", '
+            '"customs_number": "...", "cfs_address": "..."}'
+        )
     try:
         parsed = _parse_llm_json(gemini.generate_multimodal(prompt, [(mime, data_bytes)]))
         if not parsed:
@@ -1978,7 +2013,7 @@ def extract_lcl_fields_via_llm(gemini, data_bytes, mime, filename):
         return {}
 
 
-def extract_lcl_fields_from_bytes(data_bytes, mime, filename=""):
+def extract_lcl_fields_from_bytes(data_bytes, mime, filename="", strict=False):
     """Run the same regex-then-LLM-cross-check extraction pipeline
     lcl_arrivals_process (app/routes/api/operations_api.py) already uses for an
     email's own attachment, but directly against arbitrary document bytes with no
@@ -1989,6 +2024,11 @@ def extract_lcl_fields_from_bytes(data_bytes, mime, filename=""):
     real-document bug fixes - this is a separate, independent caller of the same
     underlying primitives, not a refactor of it).
 
+    strict is forwarded as-is to extract_lcl_arrival_data / extract_lcl_fields_via_llm
+    (see their docstrings) - the sole real caller of this function
+    (operations_extract_lcl_fields_from_bytes) always passes strict=True, since every
+    document it's ever handed genuinely IS an Arrival Notice.
+
     Same merge rule as that inline logic: the regex pass over the PDF's text layer
     runs first; wherever we have the real bytes, Gemini's page-aware multimodal read
     is also consulted and WINS whenever it disagrees with a non-empty regex value
@@ -1997,9 +2037,9 @@ def extract_lcl_fields_from_bytes(data_bytes, mime, filename=""):
     own history); an empty LLM answer never overrides a real regex value (LLM
     silence isn't evidence the regex was wrong)."""
     page_texts = _extract_pdf_page_texts(data_bytes) if data_bytes else []
-    extracted = extract_lcl_arrival_data("\n".join(page_texts))
+    extracted = extract_lcl_arrival_data("\n".join(page_texts), strict=strict)
     if data_bytes:
-        llm_fields = extract_lcl_fields_via_llm(GeminiClient(), data_bytes, mime, filename)
+        llm_fields = extract_lcl_fields_via_llm(GeminiClient(), data_bytes, mime, filename, strict=strict)
         for k in ("container_number", "devanning_date", "customs_number", "cfs_address"):
             llm_val = llm_fields.get(k)
             if not llm_val:

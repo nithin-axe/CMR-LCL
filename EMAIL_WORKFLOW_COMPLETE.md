@@ -25,7 +25,7 @@
 ### Stage 4a: Documents Already Verified (No Upload Needed)
 - All documents found on Shypple and verified as matching
 - **Email gets YELLOW STAR** ✓
-- **Email marked as READ** ✓
+- **Email marked as READ** ✓ (nothing was actually uploaded - already correct)
 - Status: `up_to_date`
 - Ready to move to "Processed - India filing" label
 
@@ -34,7 +34,7 @@
 - User confirms upload in Shypple browser
 - Documents uploaded successfully
 - **Email gets YELLOW STAR** ✓
-- **Email marked as READ** ✓
+- **Email marked as UNREAD** ✓ (a document was actually uploaded/changed)
 - Status: `uploaded`
 - Ready to move to "Processed - India filing" label
 
@@ -67,9 +67,19 @@
    - During upload preparation
    - Reason: Operator can see "unread" = "still needs attention"
 
-2. **After Successful Upload**: Email gets **YELLOW STAR** + **MARKED READ**
-   - Indicates: "Done - ready to move to Processed label"
-   - Matches existing "Process yellow-starred" workflow
+2. **When finished, every outcome gets a YELLOW STAR** - which read state depends on
+   whether a document was actually uploaded:
+   - **Nothing needed uploading** (already identical to what's on Shypple) -> marked
+     **READ**. CMR's `up_to_date`; LCL's "already uploaded and identical" outcome for
+     Arrival Notice/Delivery Order (see `verify_existing_document_before_upload`
+     below).
+   - **A document WAS actually uploaded/changed** -> marked **UNREAD**, so it stays
+     visibly flagged rather than disappearing into the read state. CMR's `uploaded`;
+     LCL's `lcl_done` after a real upload.
+   - Both pipelines agree on this split. Since `_mark_source_email_read` and
+     `_mark_source_email_unread` both write into the same `job["read_status"]`/
+     `job["read_error"]` fields, each also sets `job["read_action"]` ("read"/"unread")
+     so the dashboard's per-job detail line shows the right wording.
 
 3. **Special Cases**: Different stars for different outcomes
    - **Blue star**: No organization (forwarded, not uploaded)
@@ -85,25 +95,58 @@
 - Records `job["star_status"]` ("done"/"failed")
 - Records `job["star_color"]` for dashboard display
 
+**`_mark_source_email_unread(job)`**
+- Calls Gmail automation to mark email as unread
+- Records `job["read_status"]` ("done"/"failed") and `job["read_action"] = "unread"`
+- Called whenever a document was actually (re-)uploaded/changed, for both the CMR
+  and LCL Arrivals/Release pipelines
+
 **`_mark_source_email_read(job)`**
 - Calls Gmail automation to mark email as read
-- Records `job["read_status"]` ("done"/"failed")
-- Only called AFTER successful upload
+- Records `job["read_status"]` ("done"/"failed") and `job["read_action"] = "read"`
+- Called whenever nothing needed uploading because it was already identical, for
+  both pipelines
+
+**`verify_existing_document_before_upload(page, job, doc_type, mail_bytes, mail_mime, containers, attachment_index=None)`**
+- LCL-only. Before uploading an Arrival Notice/Delivery Order, scrapes
+  `#shipment-document-table`, and if a document matching the same doc_type AND
+  container is already there: downloads it, saves a local copy to the system
+  Downloads folder, and compares its content against the email's own copy (same
+  Gemini-based `compare_document_versions` mechanism CMR uses). Returns
+  `{"exists", "same", "differences", "reason"}` - `handle_arrival_notice`/
+  `handle_delivery_order` skip the upload (read + yellow star) when `same` is true,
+  or pause on `awaiting_lcl_document_diff_confirmation` (showing the field-by-field
+  `differences` in the Operations Process panel) and wait for the operator before
+  uploading when `exists` is true but `same` is false.
 
 ### Calling Points
 
-**Line ~1100** (Documents verified, no upload needed):
+**`_verify_and_upload_documents`** (Documents verified, no upload needed):
 ```python
 _star_source_email(job, "yellow")
 _mark_source_email_read(job)
 set_job_status(job, "up_to_date", ...)
 ```
 
-**Line ~1200+** (Documents uploaded successfully):
+**`_verify_and_upload_documents`** (Documents uploaded successfully):
+```python
+_star_source_email(job, "yellow")
+_mark_source_email_unread(job)
+set_job_status(job, "uploaded", ...)
+```
+
+**`handle_arrival_notice` / `handle_delivery_order`** (existing document identical - no upload needed):
 ```python
 _star_source_email(job, "yellow")
 _mark_source_email_read(job)
-set_job_status(job, "uploaded", ...)
+set_job_status(job, "lcl_done", ...)
+```
+
+**`handle_arrival_notice` / `handle_delivery_order`** (document uploaded successfully):
+```python
+_star_source_email(job, "yellow")
+_mark_source_email_unread(job)
+set_job_status(job, "lcl_done", ...)
 ```
 
 **Line ~900** (No organization):
@@ -128,21 +171,40 @@ _star_source_email(job, "purple")
 - [ ] Shypple verifies documents
 - [ ] After verification completes:
   - [ ] Email has YELLOW STAR in Gmail
-  - [ ] Email is marked as READ in Gmail
-  - [ ] Dashboard shows "uploaded" or "up_to_date" status
+  - [ ] Email is UNREAD if a document was actually uploaded, or READ if nothing
+        needed uploading (already identical)
+  - [ ] Dashboard shows "uploaded"/"lcl_done" (document uploaded) or
+        "up_to_date"/"lcl_done" (nothing needed uploading) status
+  - [ ] Operations Process panel shows "Marked source email as unread" or "...as
+        read" matching which actually happened
+- [ ] LCL only: re-process a mail whose Arrival Notice/Delivery order is already on
+      Shypple with DIFFERENT content than the email's copy -> confirm the
+      `awaiting_lcl_document_diff_confirmation` banner shows the field-by-field diff
+      table before allowing the (re-)upload
 
 ## Troubleshooting
 
-**Email marked as read too early?**
-- Check that auto-classification uses `classify_email_meta()` (metadata-only)
-- Verify `_mark_source_email_read()` is only called after upload
+**Email opened/marked read during classification?**
+- Check that auto-classification uses `classify_email_meta()` (metadata-only) -
+  `_mark_source_email_read`/`_mark_source_email_unread` only ever run after
+  upload/verification, never before
 
 **Yellow star not appearing?**
 - Check Gmail automation is running (`scripts/open_gmail.py`)
 - Verify `_star_source_email()` is being called
 - Check Flask logs for errors
 
-**Email still unread after upload?**
-- Verify `_mark_source_email_read()` was called
+**Email's read/unread state (or the panel's "Marked source email as ..." line) looks wrong?**
+- Confirm which outcome actually happened: nothing uploaded (should be READ) vs a
+  document actually uploaded (should be UNREAD) - check the job's log lines for
+  "Marked the source email as read"/"...as unread", or `job["read_action"]`
 - Check if email is from delegated mailbox (starts with "pw_")
 - Check Gmail automation logs for errors
+
+**LCL document-diff confirmation never shows, or a re-upload happens with no chance to review?**
+- Confirm `verify_existing_document_before_upload` is passing
+  `label="lcl-arrivals---release"` through to `_compare_document_versions_remote` -
+  without it, the compare's email-side fetch can resolve under the wrong label
+- Check the job's log line "... already on Shypple but DIFFERS from the email's
+  document" landed before the upload, and that `job["document_diff_preview"]` is
+  populated

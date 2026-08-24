@@ -2351,8 +2351,11 @@ def main():
                                 # Catch-all: toggle_star, mark_read, mark_unread, archive,
                                 # delete - exactly the actions
                                 # scripts/shypple_process.py's _star_source_email (toggle
-                                # path)/_mark_source_email_read/_mark_source_email_unread
-                                # use, for EITHER pipeline's messages.
+                                # path)/_mark_source_email_unread use, for EITHER
+                                # pipeline's messages (mark_read is still a supported
+                                # action here for the dashboard's own manual read/unread
+                                # toggle - shypple_process.py itself just never calls it,
+                                # since both pipelines' terminal rule is unread+star).
                                 req.result = perform_list_action(
                                     _resolve_action_page(req.message_id), req.action, req.message_id
                                 )

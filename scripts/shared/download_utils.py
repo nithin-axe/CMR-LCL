@@ -62,12 +62,35 @@ def get_downloads_dir():
     return downloads
 
 
+import urllib.request
+import urllib.parse
+
+
 def fetch_bytes_via_request(page, url, timeout_ms=20000):
     """Plain authenticated GET via Playwright's own request context (reuses the
-    browser's cookies - no separate auth needed). Returns (bytes, content_type) or
-    (None, None)."""
+    browser's cookies - no separate auth needed). Handles HTTP 301/302 redirects to
+    external storage hosts (e.g. S3/GCS presigned URLs) by fetching the location without
+    forwarding Shypple session cookies/auth headers, which would cause S3/GCS to return
+    400/403. Returns (bytes, content_type) or (None, None)."""
     try:
-        resp = page.request.get(url, timeout=timeout_ms)
+        resp = page.request.get(url, timeout=timeout_ms, max_redirects=0)
+        if resp.status in (301, 302, 303, 307, 308):
+            redirect_url = resp.headers.get("location")
+            if redirect_url:
+                if not redirect_url.startswith("http"):
+                    redirect_url = urllib.parse.urljoin(url, redirect_url)
+                parsed_orig = urllib.parse.urlparse(url)
+                parsed_red = urllib.parse.urlparse(redirect_url)
+                if parsed_orig.netloc != parsed_red.netloc:
+                    req = urllib.request.Request(
+                        redirect_url,
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+                    )
+                    with urllib.request.urlopen(req, timeout=timeout_ms / 1000) as r:
+                        content_type = (r.headers.get("content-type", "") or "").split(";")[0].strip()
+                        return r.read(), content_type
+                else:
+                    return fetch_bytes_via_request(page, redirect_url, timeout_ms=timeout_ms)
         if not resp.ok:
             print(f"[download_utils] fetch_bytes_via_request: HTTP {resp.status} for {url}")
             return None, None
