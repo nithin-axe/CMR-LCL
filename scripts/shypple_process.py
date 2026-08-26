@@ -3067,13 +3067,27 @@ def process_one_job(page, job):
         # what actually guarantees a click landing during that ~70s window isn't lost -
         # see its own docstring for the bug this fixed (a confirm click used to need a
         # second click to register whenever it landed while the star was still retrying).
+        #
+        # The star itself runs on a background thread, NOT inline before
+        # _wait_for_confirmation() - a previous version called it inline here ("best-
+        # effort visual marker - never blocks the gate above"), but that comment was
+        # only true for the banner becoming VISIBLE, not for the confirm click actually
+        # being ACTED on: _wait_for_confirmation() only runs after this call returns, so
+        # a click landing (and setting proceed_event) anywhere during that up-to-~70s
+        # window was correctly retained, but this thread couldn't reach the .wait() that
+        # picks it up - and therefore couldn't proceed with the actual org switch -
+        # until the star finished. That's what looked like the "Confirm switch" button
+        # doing nothing for up to a minute, with an operator re-clicking it (harmlessly,
+        # but pointlessly) in the meantime. Backgrounding it means this thread reaches
+        # _wait_for_confirmation() immediately, so a confirm click is acted on the
+        # instant it lands.
         _open_confirmation_gate()
         set_job_status(job, "awaiting_org_switch_confirmation",
                         phase="Waiting for confirmation to switch organization",
                         tried_containers=tried, target_org=FRESH_ORG_NAME)
         log_job(job, f"Waiting for confirmation before switching Shypple to '{FRESH_ORG_NAME}' and "
                       f"re-searching container(s) ({', '.join(tried)}) there.")
-        _star_source_email(job, "blue")  # best-effort visual marker - never blocks the gate above
+        threading.Thread(target=_star_source_email, args=(job, "blue"), daemon=True).start()
         if not _wait_for_confirmation(job):
             set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
             log_job(job, "Skipped by operator - left as-is, organization not switched.")
