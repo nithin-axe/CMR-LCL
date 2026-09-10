@@ -1242,20 +1242,18 @@ def classify_documents_lcl(message_id, subject, body_html, attachments, force=Fa
 
 def _extract_containers_via_llm(gemini, data_bytes, mime, filename):
     """Read ISO-6346 container number(s) directly off a document's actual bytes via
-    Gemini multimodal. Fallback for exactly the case _extract_pdf_page_texts's own
-    docstring warns about but the CMR-override path (below) never actually used: a
-    scanned or handwritten PDF/image with no extractable text layer - very common for
-    a CMR consignment note, which is normally a hand-filled form - where the
-    deterministic regex pass over the (empty) text layer finds nothing even though a
-    human reading the page can see the container number right there. Best-effort only;
+    Gemini multimodal. Handles printed OR handwritten container numbers in any format
+    (boxes 1-24, stamps, messy handwriting, spaced/dashed format). Best-effort only;
     returns [] on any failure or on a non-multimodal-readable file, never raises."""
     if not data_bytes or not (mime or "").startswith(_LLM_READABLE_PREFIXES) or len(data_bytes) > 18 * 1024 * 1024:
         return []
     prompt = (
-        "This is a scanned freight/logistics document (e.g. a CMR consignment note). "
-        "Read EVERY ISO-6346 container number printed OR handwritten on it - 4 letters "
-        "(a 3-letter owner code + U/J/Z category code) followed by 7 digits, e.g. "
-        "TEMU9681744 or CAIU7160568. Handwritten numbers can be messy - read carefully. "
+        "This is a freight/logistics document (e.g. a CMR consignment note, bill of lading, or arrival document). "
+        "Examine the document carefully - including any printed text, handwritten notes, hand-filled form boxes "
+        "(e.g. boxes 1-24 on a CMR form), stamps, margins, or headers/footers. "
+        "Extract ALL ISO-6346 container numbers printed OR handwritten on it (4 letters followed by 6 or 7 digits, "
+        "e.g. TEMU9681744, TEMU 968174-4, CAIU7160568, MSCU1234567). Handwritten letters or numbers can be messy, "
+        "slanted, or spaced out - read them thoroughly. "
         "Respond with ONLY a JSON object, no markdown fences:\n"
         '{"containers": ["..."]}'
     )
@@ -1384,12 +1382,20 @@ def _classify_documents_with_overrides(message_id, subject, body_html, attachmen
         documents.extend(sub_docs)
 
     email_type = _pick_email_type(documents)
+    # Collect containers: PRIORITIZE attachment document containers first!
+    # Only fall back to subject/body containers if no attachment document container was found.
+    attachment_containers = _merge_containers(*[d.get("containers") for d in documents if d.get("source") == "attachment"])
+    if attachment_containers:
+        all_containers = attachment_containers
+    else:
+        all_containers = _merge_containers(*[d.get("containers") for d in documents])
+
     record = {
         "message_id": message_id,
         "email_type": email_type,
         "doc_types": _distinct_types([d["type"] for d in documents]),
         "type_counts": _type_counts([d["type"] for d in documents if d["source"] == "attachment"]),
-        "containers": _merge_containers(*[d.get("containers") for d in documents]),
+        "containers": all_containers,
         "documents": documents,
         "source": "deep",
         "classified_at": datetime.now(timezone.utc).isoformat(),

@@ -3289,32 +3289,14 @@ def _verify_and_upload_documents(page, job, match, containers):
     if not needs_upload:
         # Nothing needed uploading - every extracted type was already present and
         # verified to match content-for-content - so mark READ rather than unread
-        # (per the operator's explicit rule: unread+star means "something was
-        # actually uploaded/changed, worth a look"; read+star means "already correct,
-        # nothing happened here"). Matches LCL's own "already uploaded and identical"
-        # outcome (handle_arrival_notice/handle_delivery_order via
-        # verify_existing_document_before_upload) - both pipelines agree on this
-        # distinction. An email where a document IS actually (re-)uploaded, just
-        # below, stays unread + yellow star.
         _star_source_email(job, "yellow")
         _mark_source_email_read(job)
         set_job_status(job, "up_to_date", phase="Done - documents present and verified")
         log_job(job, "All extracted document types are present on Shypple and verified as matching.")
         return
 
-    _open_confirmation_gate()
-    set_job_status(job, "awaiting_upload_confirmation", phase="Waiting for manual confirmation",
-                    missing_doc_types=[n["type"] for n in needs_upload])
-    log_job(job, f"Document(s) needing upload: {needs_upload}. Waiting for confirmation before upload.")
-    if not _wait_for_confirmation(job):
-        set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
-        log_job(job, "Skipped by operator - left as-is, nothing uploaded.")
-        return
-    # Without this, job["status"] stayed "awaiting_upload_confirmation" for the ENTIRE
-    # upload preparation below (reading the customer name, fetching each document's
-    # bytes, filling the form - which can take a while) - the dashboard kept re-showing
-    # the exact same "Confirm upload" banner with no visible change, making a confirm
-    # click that DID register look like it had done nothing.
+    # Per operator request: Single manual verification workflow for CMR process.
+    # Proceed directly to preparing and filling document form, pausing ONLY at awaiting_submit_confirmation.
     set_job_status(job, "processing", phase="Preparing document upload...")
 
     # Read the customer name once (only if some type actually needs it) rather than

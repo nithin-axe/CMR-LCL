@@ -229,18 +229,14 @@ _TOOLBAR_HELPERS_JS = """
         // Text match FIRST here, unlike findArchiveButton/findDeleteButton above -
         // "mark as read" vs "mark as unread" (EN and NL) are unambiguous phrases that
         // never collide as substrings of each other, so aria-label is the more
-        // trustworthy signal for exactly these two, not just a fallback. The 'm9'
-        // class token was a one-off capture from this account's build and, if Gmail
-        // ever reassigns/changes it (or it was mis-captured against the wrong
-        // button to begin with), would confidently match the WRONG toolbar button
-        // and click it without ever reaching this text check - which is exactly what
-        // made "mark as read" actually mark the mail unread instead.
-        let btn = buttons.find(b => /markeren als gelezen|mark as read/i.test(b.getAttribute('aria-label') || ''));
+        // trustworthy signal for exactly these two, not just a fallback. Handles Dutch
+        // ("Als gelezen markeren" / "Markeren als gelezen") and English.
+        let btn = buttons.find(b => /(markeren\\s+als\\s+gelezen|als\\s+gelezen\\s+markeren|mark\\s+as\\s+read|\\bgelezen\\b)/i.test(b.getAttribute('aria-label') || b.getAttribute('data-tooltip') || ''));
         if (btn) return btn;
         return buttons.find(b => hasClassToken(b, 'm9'));
     }
     function findMarkUnreadButton(buttons) {
-        let btn = buttons.find(b => /markeren als ongelezen|mark as unread/i.test(b.getAttribute('aria-label') || ''));
+        let btn = buttons.find(b => /(markeren\\s+als\\s+ongelezen|als\\s+ongelezen\\s+markeren|mark\\s+as\\s+unread|\\bongelezen\\b)/i.test(b.getAttribute('aria-label') || b.getAttribute('data-tooltip') || ''));
         if (btn) return btn;
         return buttons.find(b => hasClassToken(b, 'bvt'));
     }
