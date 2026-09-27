@@ -1715,11 +1715,20 @@ def _build_meta_prompt(subject, snippet, sender, attachment_names, has_attachmen
 
 
 def extract_sf_number(text):
-    """Extract SF number like SF169508 from email subject, body or text."""
+    """Extract SF number like SF169508 from email subject, body or text.
+
+    Also matches SF separated from its digits by a hyphen, colon, or space
+    (e.g. "YourReference:SF-172697", "SF: 172697") - a real Shypple subject
+    line token that a stricter SF-immediately-followed-by-digits pattern never
+    matched, so a subject that plainly carried the shipment's SF number was
+    reported as "no SF number found" (see _lcl_star_yellow_and_unread's
+    no-SF-number path in operations_api.py). Always returns the canonical
+    SF<digits> form with the separator stripped, matching the shape every
+    other extraction path (LLM extraction, container search) already uses."""
     if not text:
         return None
-    m = re.search(r"\bSF\d+\b", text, re.IGNORECASE)
-    return m.group(0).upper() if m else None
+    m = re.search(r"\bSF[\s\-:]{0,2}(\d+)\b", text, re.IGNORECASE)
+    return f"SF{m.group(1)}" if m else None
 
 
 def extract_bl_number(text):

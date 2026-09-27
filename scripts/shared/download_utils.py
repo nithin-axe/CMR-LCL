@@ -147,16 +147,57 @@ def fetch_bytes_via_js(page, url, timeout_ms=20000):
         return None, None
 
 
+def _looks_like_error_page(data, mime):
+    """True if ``data``/``mime`` looks like an HTML/XML error, login, or
+    interstitial page rather than the real file being fetched - e.g. a session
+    cookie got rejected, or a storage host returned an <Error>/<AccessDenied> XML
+    body. A plain HTTP-success check isn't enough to catch this: the request
+    genuinely succeeds (200, non-empty body), it's just NOT the file.
+
+    Root cause of a real bug: fetch_bytes_robust used to accept whatever came back
+    from fetch_bytes_via_request at face value. When Gmail's attachment URL
+    occasionally served an interstitial/error page instead of the real attachment
+    (e.g. a session hiccup) that HTML got treated as the actual document -
+    base64-cached, and later uploaded to Shypple AS the shipment document. It
+    "uploaded successfully" (any bytes with an allowed extension are accepted
+    server-side) but showed a blank page whenever anyone opened it afterwards,
+    since neither Shypple's own viewer nor this project's PDF viewer can render an
+    HTML page as if it were a PDF. Deliberately conservative: only flags the
+    unambiguous case (empty body, or a body that starts with HTML/XML markup) so a
+    real binary document is never wrongly rejected."""
+    if not data:
+        return True
+    mime_clean = (mime or "").split(";")[0].strip().lower()
+    if mime_clean in ("text/html", "application/xhtml+xml", "application/xml", "text/xml"):
+        return True
+    head = data[:256].lstrip().lower()
+    return head.startswith((b"<!doctype html", b"<html", b"<?xml", b"<error"))
+
+
 def fetch_bytes_robust(page, url, timeout_ms=20000):
-    """fetch_bytes_via_request, falling back to fetch_bytes_via_js if that fails.
-    Covers the common case (plain authenticated GET) cheaply, without paying the
-    extra page.evaluate() round-trip unless the first attempt genuinely failed.
-    Bounded at 2x timeout_ms total (one full attempt each), never unbounded."""
+    """fetch_bytes_via_request, falling back to fetch_bytes_via_js if that fails OR
+    if it "succeeds" with an HTML/XML error/login page instead of the real file
+    (see _looks_like_error_page's docstring for the real bug this closes). Covers
+    the common case (plain authenticated GET) cheaply, without paying the extra
+    page.evaluate() round-trip unless the first attempt genuinely failed or
+    returned something unusable. If the JS fallback ALSO comes back looking like
+    an error page, gives up and returns (None, None) rather than letting that
+    content be cached/uploaded/served as if it were the real document. Bounded at
+    2x timeout_ms total (one full attempt each), never unbounded."""
     data, mime = fetch_bytes_via_request(page, url, timeout_ms=timeout_ms)
-    if data is not None:
+    if data is not None and not _looks_like_error_page(data, mime):
         return data, mime
-    print(f"[download_utils] fetch_bytes_robust: falling back to in-page JS fetch for {url}")
-    return fetch_bytes_via_js(page, url, timeout_ms=timeout_ms)
+    if data is not None:
+        print(f"[download_utils] fetch_bytes_robust: request returned an HTML/XML error/login "
+              f"page instead of the real file for {url} - falling back to in-page JS fetch.")
+    else:
+        print(f"[download_utils] fetch_bytes_robust: falling back to in-page JS fetch for {url}")
+    js_data, js_mime = fetch_bytes_via_js(page, url, timeout_ms=timeout_ms)
+    if js_data is not None and _looks_like_error_page(js_data, js_mime):
+        print(f"[download_utils] fetch_bytes_robust: in-page JS fetch ALSO returned an HTML/XML "
+              f"error/login page for {url} - giving up rather than using that as the real file.")
+        return None, None
+    return js_data, js_mime
 
 
 def save_via_native_download(page, element, target_path, timeout_ms=20000):

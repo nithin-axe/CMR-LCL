@@ -36,13 +36,24 @@ class GeminiClient:
         callers that then run the result through a regex-based JSON extractor were
         seeing occasional non-JSON output (extra prose, markdown fences, truncation)
         that had no diagnosable cause once collapsed into a generic parse failure.
+
+        ``temperature=0`` is always set: every caller of this method (document
+        classification, field/date extraction, same-vs-different document
+        comparison) is a deterministic read-the-document task with one right answer,
+        never a creative one. Without this, Gemini's default (non-zero) sampling
+        temperature meant the exact same PDF/image could occasionally be read
+        differently across calls - the likely root cause of a real bug where a
+        delay/devanning notice's date was misread on one run and read correctly
+        (from the identical bytes) on a retry of the same mail.
         """
         self._configure()
         content = [prompt]
         for mime_type, data in (parts or []):
             if data:
                 content.append({"mime_type": mime_type, "data": data})
-        generation_config = {"response_mime_type": "application/json"} if json_mode else None
+        generation_config = {"temperature": 0}
+        if json_mode:
+            generation_config["response_mime_type"] = "application/json"
         response = self._model.generate_content(content, generation_config=generation_config)
         candidates = getattr(response, "candidates", None) or []
         if not candidates or not getattr(candidates[0], "content", None) or not candidates[0].content.parts:

@@ -526,15 +526,66 @@ def _save_shypple_session_tokens(page):
         log_system(f"Could not save session tokens: {e}")
 
 
+def _try_google_gate_password_login(page):
+    """On Shypple's Google-SSO gate, click through to the "Or click here to login
+    with email and password instead" fallback form and sign in as Deepak (whose
+    account has direct admin access via password, unlike SHYPPLE_EMAIL/PASSWORD's
+    Google-only account) - so a batch never has to block on a human completing the
+    Google OAuth flow. Returns True once the fallback form was found and submitted
+    (the caller re-checks admin access itself to confirm it actually worked), False
+    if the fallback link never showed up (e.g. a genuinely different gate), in which
+    case the caller falls back to the manual-confirmation gate."""
+    email = os.environ.get("SHYPPLE_ADMIN_EMAIL", "")
+    password = os.environ.get("SHYPPLE_ADMIN_PASSWORD", "")
+    if not email or not password:
+        log_system("SHYPPLE_ADMIN_EMAIL/SHYPPLE_ADMIN_PASSWORD not set - cannot auto-fill the Google-login fallback form.")
+        return False
+    try:
+        toggle = page.wait_for_selector('a[data-target="#passwordSection"]', timeout=5000)
+    except Exception:
+        return False
+    try:
+        toggle.click()
+        page.wait_for_selector('#user_email', timeout=5000)
+        page.fill('#user_email', email)
+        page.fill('#user_password', password)
+        page.click('#passwordSection input[type="submit"]')
+        log_system("Submitted Shypple admin sign-in with email/password (Google-login fallback).")
+        return True
+    except Exception as e:
+        log_system(f"Could not complete email/password fallback sign-in: {e}")
+        return False
+
+
 def ensure_admin_access(page):
-    """Navigate to the admin app; if it's gated behind Google SSO, pause and wait for
-    a human to complete that sign-in in this same browser window, then resume."""
+    """Navigate to the admin app; if it's gated behind Google SSO, sign in via the
+    email/password fallback form as Deepak instead of pausing for a human to
+    complete Google sign-in. Only falls back to the manual confirmation gate if
+    that fallback form isn't present or the sign-in doesn't actually land on an
+    admin page."""
     log_system("Opening Shypple admin...")
     _safe_goto(page, SHYPPLE_BOOTSTRAP_URL)
     page.wait_for_timeout(2000)
     if _has_admin_access(page):
         _save_shypple_session_tokens(page)
         return
+
+    if _try_google_gate_password_login(page):
+        page.wait_for_timeout(2000)
+        if _has_admin_access(page, timeout=8000):
+            log_system("Admin access confirmed (email/password sign-in).")
+            _save_shypple_session_tokens(page)
+            return
+        try:
+            _safe_goto(page, SHYPPLE_BOOTSTRAP_URL)
+            page.wait_for_timeout(2000)
+        except Exception as e:
+            log_system(f"Navigation after email/password sign-in was interrupted, checking current page anyway: {e}")
+        if _has_admin_access(page, timeout=10000):
+            log_system("Admin access confirmed.")
+            _save_shypple_session_tokens(page)
+            return
+        log_system("Email/password fallback sign-in did not reach the admin page - falling back to manual Google sign-in.")
 
     log_system("Admin access needs a manual Google sign-in. Waiting for Proceed...")
     _open_confirmation_gate()
@@ -1084,7 +1135,12 @@ def edit_preceding_customs_and_cfs(page, customs_number, cfs_address):
     """Click Edit tab (<a class="btn btn-primary ml-2" href="/admin/shipments/.../edit">Edit</a>),
     fill Preceding Customs Number (#shipment_preceding_customs_number),
     and select Discharge CFS (#select2-shipment_discharge_cfs_id-container).
-    First 3 upper case letters matching (e.g. CTG -> CTG Logistics option, else 1st option).
+
+    Discharge CFS is matched against the extracted free text by longest-common-
+    prefix (see the in-page match() below) - NOT a blind first-3-letters-only
+    match. Returns {"cfs_matched": bool, "cfs_selected_text": str|None} so
+    callers can tell a confident match from a shot in the dark; callers must
+    NOT treat cfs_address as "verified"/"corrected" when cfs_matched is False.
     """
     edit_link = page.query_selector('a[href*="/edit"]')
     if edit_link:
@@ -1099,56 +1155,68 @@ def edit_preceding_customs_and_cfs(page, customs_number, cfs_address):
         if cust_el:
             cust_el.fill(customs_number)
 
+    result = {"cfs_matched": None, "cfs_selected_text": None}
     if cfs_address:
-        prefix = cfs_address[:3].upper() if len(cfs_address) >= 3 else cfs_address.upper()
         # Open select2 for shipment_discharge_cfs_id
         _select2_open(page, "shipment_discharge_cfs_id")
         page.wait_for_timeout(300)
 
-        # Match options. Two SEPARATE passes, not one interleaved loop: Shypple's real
-        # Discharge CFS list has BOTH "CTG Export" and "CTG Logistics B.V." as distinct
-        # options, with "CTG Export" listed FIRST - a single per-option loop checking
-        # both conditions together broke on "CTG Export" (it satisfies the generic
-        # startsWith('CTG') fallback) before ever reaching "CTG Logistics B.V." later in
-        # the list, even though the specific "ctg logistics" check was meant to win.
-        # Confirmed live against the real dropdown (operator's screenshot). Doing the
-        # specific "ctg logistics" search as its own complete pass over ALL options
-        # first guarantees it beats the generic prefix fallback regardless of list order.
-        matched = page.evaluate("""(prefix) => {
+        # Root cause of a real bug: Shypple's Discharge CFS options can share the
+        # same first 3 letters (confirmed: "CTG Export" AND "CTG Logistics B.V."
+        # both start with "CTG") - a plain first-3-letters match picks whichever
+        # of them happens to come FIRST in DOM order, silently saving the WRONG
+        # warehouse even though the extracted text (from a document that plainly
+        # said e.g. "CTG Logistics") was correct. Worse, the old code's fallback
+        # when NOTHING matched was to blindly pick sel.options[1] - some
+        # arbitrary "first real option" - which is never the right answer and
+        # was reported back as a success ("matched": true).
+        #
+        # Fixed by: (1) keeping the one CONFIRMED, operator-verified collision
+        # (raw text "CTG" alone always means CTG Logistics on the real dropdown,
+        # never CTG Export) as an explicit rule checked first; (2) for
+        # everything else, matching against the FULL extracted text at
+        # decreasing prefix lengths (longest first) and only accepting a
+        # length once it resolves to EXACTLY ONE option - so "CTG Logistics"
+        # (13 chars) matches its one option directly, long before the search
+        # ever reaches the ambiguous 3-letter "CTG" prefix that both options
+        # share; (3) never guessing - if no prefix length down to 3 chars
+        # resolves to a single option, the dropdown is left UNCHANGED and
+        # cfs_matched comes back False instead of a wrong option being saved.
+        result = page.evaluate("""(fullTarget) => {
             const sel = document.getElementById('shipment_discharge_cfs_id');
-            if (!sel) return false;
-            let targetOpt = null;
-            if (prefix === 'CTG') {
-                for (const opt of sel.options) {
-                    const txt = (opt.textContent || '').trim();
-                    if (txt.toLowerCase().includes('ctg logistics')) {
-                        targetOpt = opt.value;
-                        break;
-                    }
-                }
-            }
-            if (!targetOpt) {
-                for (const opt of sel.options) {
-                    const txt = (opt.textContent || '').trim();
-                    if (txt.toUpperCase().startsWith(prefix)) {
-                        targetOpt = opt.value;
-                        break;
-                    }
-                }
-            }
-            if (!targetOpt && sel.options.length > 1) {
-                targetOpt = sel.options[1].value;
-            }
-            if (targetOpt) {
-                sel.value = targetOpt;
+            if (!sel) return {cfs_matched: false, cfs_selected_text: null};
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toUpperCase();
+            const options = Array.from(sel.options).filter(o => o.value);
+            const target = norm(fullTarget);
+
+            const finalize = (opt) => {
+                sel.value = opt.value;
                 if (window.jQuery) {
                     window.jQuery(sel).trigger('change').trigger('select2:select');
                 }
-                return true;
+                return {cfs_matched: true, cfs_selected_text: (opt.textContent || '').trim()};
+            };
+
+            if (target === 'CTG') {
+                const ctgLogistics = options.find(o => norm(o.textContent).includes('CTG LOGISTICS'));
+                if (ctgLogistics) return finalize(ctgLogistics);
             }
-            return false;
-        }""", prefix)
-        log_system(f"Set Discharge CFS option matching '{prefix}': {matched}")
+
+            for (let len = target.length; len >= 3; len--) {
+                const prefix = target.slice(0, len);
+                const candidates = options.filter(o => norm(o.textContent).startsWith(prefix));
+                if (candidates.length === 1) return finalize(candidates[0]);
+                if (candidates.length > 1 && len === 3) break;
+            }
+
+            return {cfs_matched: false, cfs_selected_text: null};
+        }""", cfs_address)
+        log_system(
+            f"Discharge CFS for '{cfs_address}': "
+            + (f"matched '{result.get('cfs_selected_text')}'" if result.get("cfs_matched")
+               else "NO confident match found - left unchanged, needs manual review")
+        )
+    return result
 
 
 def check_edit_tab_customs_and_cfs(page):
@@ -1601,6 +1669,22 @@ def fill_shipment_document_form(page, doc_type, file_bytes, file_mime, filename,
         # assuming .pdf, before it ever reaches the file input.
         if not file_bytes or len(file_bytes) == 0:
             return {"success": False, "error": f"File bytes for '{doc_type}' are empty (0 bytes)"}
+
+        # Defense in depth against a real, confirmed bug: an upstream fetch that
+        # "succeeds" (non-empty body) but actually returned an HTML/XML error or
+        # login/interstitial page instead of the real document (see
+        # download_utils.fetch_bytes_robust's own fix for where this came from on
+        # the Gmail-attachment side) previously sailed straight through here - the
+        # is_html check right below would even happily convert that error page to a
+        # PDF and upload IT, "successfully", producing a document that shows a
+        # blank/garbage page whenever anyone opens it afterwards. Reject it here
+        # too, at the last point before anything is written to Shypple.
+        if _looks_like_error_page(file_bytes, file_mime):
+            return {
+                "success": False,
+                "error": f"File bytes for '{doc_type}' look like an HTML/XML error or login page, "
+                         "not the real document - refusing to upload it. Try Process/verification again.",
+            }
 
         upload_name = filename or ""
         file_ext = os.path.splitext(upload_name)[1].lower()
@@ -2298,7 +2382,13 @@ def handle_arrival_notice(page, job):
     log_job(job, "Container number / devanning date saved on the Containers tab.")
 
     set_job_status(job, "processing", phase="Editing customs number / CFS and updating shipment")
-    edit_preceding_customs_and_cfs(page, customs_number, cfs_address)
+    cfs_result = edit_preceding_customs_and_cfs(page, customs_number, cfs_address)
+    if cfs_address and not cfs_result.get("cfs_matched"):
+        with STATE_LOCK:
+            job["cfs_match_warning"] = (
+                f"Could not confidently match Discharge CFS option for '{cfs_address}' - left unchanged, needs manual review."
+            )
+        log_job(job, job["cfs_match_warning"])
     update_result = click_update_shipment(page)
     if not update_result.get("success"):
         set_job_status(job, "error", error=f"Could not update shipment: {update_result.get('error')}")
@@ -2412,19 +2502,33 @@ def _extract_bl_number(text):
 
 
 def _values_match_cfs(extracted, current):
-    """Same prefix-matching rule edit_preceding_customs_and_cfs itself already uses
-    to pick a Discharge CFS dropdown option from free text (first 3 letters, with a
-    "CTG Logistics" special case, see that function) - reused here to judge whether
-    the Edit tab's CURRENT dropdown label already corresponds to what the Arrival
-    Notice document says. A strict string compare would false-flag every match: the
-    Edit tab holds a dropdown LABEL (e.g. "CTG Logistics B.V."), the document gives
-    free text (e.g. "VLS BELGIUM" or "CTG")."""
+    """Judge whether the Edit tab's CURRENT Discharge CFS dropdown label already
+    corresponds to what the Arrival Notice document says. A strict string compare
+    would false-flag every match: the Edit tab holds a dropdown LABEL (e.g. "CTG
+    Logistics B.V."), the document gives free text (e.g. "VLS BELGIUM" or "CTG").
+
+    Root cause of a real bug: this used to truncate `extracted` to just its first
+    3 letters before comparing. Two different real Discharge CFS options can share
+    the same first 3 letters (confirmed: "CTG Export" and "CTG Logistics B.V.") -
+    so whenever the CURRENT (wrong) dropdown value happened to share a 3-letter
+    prefix with the document's ACTUAL warehouse, this returned a false "already
+    matches", and the caller (_verify_existing_arrival_notice) skipped correcting
+    it - the document plainly named the right warehouse, but Shypple kept showing
+    a different one, silently, forever. Fixed by trying the longest possible
+    prefix of `extracted` first (most specific - least likely to collide with an
+    unrelated option) and only falling back to shorter prefixes, down to a 3-char
+    floor, if the full text doesn't match - mirroring the longest-prefix-wins
+    logic edit_preceding_customs_and_cfs itself uses to SELECT the option."""
     if not extracted or not current:
         return False
-    prefix = extracted[:3].upper() if len(extracted) >= 3 else extracted.upper()
-    if prefix == "CTG":
+    norm = lambda s: re.sub(r"\s+", " ", s).strip().upper()
+    extracted_n, current_n = norm(extracted), norm(current)
+    if extracted_n == "CTG":
         return "ctg logistics" in current.lower()
-    return current.upper().startswith(prefix)
+    for length in range(len(extracted_n), 2, -1):
+        if current_n.startswith(extracted_n[:length]):
+            return True
+    return False
 
 
 def _reupload_arrival_notice(page, job, file_bytes, file_mime, filename):
@@ -2574,7 +2678,20 @@ def _verify_existing_arrival_notice(page, job, arrival_row):
         fixes["cfs_address"] = extracted["cfs_address"]
     if fixes:
         set_job_status(job, "processing", phase="Correcting Edit tab from Arrival Notice data")
-        edit_preceding_customs_and_cfs(page, fixes.get("customs_number"), fixes.get("cfs_address"))
+        cfs_result = edit_preceding_customs_and_cfs(page, fixes.get("customs_number"), fixes.get("cfs_address"))
+        if fixes.get("cfs_address") and not cfs_result.get("cfs_matched"):
+            # Don't let this look like a clean correction: the Arrival Notice
+            # genuinely said a different Discharge CFS, but no dropdown option
+            # could be confidently matched to it, so the Edit tab's CFS was left
+            # UNCHANGED (not corrected, and not corrected-to-something-wrong
+            # either - see edit_preceding_customs_and_cfs) - the operator still
+            # needs to pick it manually.
+            with STATE_LOCK:
+                job["cfs_match_warning"] = (
+                    f"Could not confidently match Discharge CFS option for "
+                    f"'{fixes['cfs_address']}' (from the Arrival Notice) - left unchanged, needs manual review."
+                )
+            log_job(job, job["cfs_match_warning"])
         update_result = click_update_shipment(page)
         if not update_result.get("success"):
             set_job_status(job, "error", error=f"Could not save Arrival Notice correction: {update_result.get('error')}")

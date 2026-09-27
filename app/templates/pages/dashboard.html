@@ -2964,6 +2964,9 @@
             }
             if (job.reason) details.push(escapeHtml(job.reason));
             if (job.error) details.push(escapeHtml(job.error));
+            if (job.cfs_match_warning) {
+                details.push(`<span style="color:#b45309;"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(job.cfs_match_warning)}</span>`);
+            }
             if (job.no_record_status === "flagged") {
                 details.push('<span style="color:var(--text-muted);"><i class="fa-solid fa-inbox"></i> No record on Shypple - marked unread and moved to label:_0 India shipments</span>');
             } else if (job.no_record_status === "failed") {

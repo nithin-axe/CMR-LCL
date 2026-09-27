@@ -453,6 +453,18 @@ def lcl_arrivals_process():
         # attached document's text (arrival_notice/delivery_order) over the email's own
         # subject/snippet, which rarely carries the container/date/customs/CFS detail.
         text_for_extraction = f"{subject} {snippet}"
+
+        # The SF number (like everything else this block extracts) can live in the
+        # mail's own BODY rather than its subject or Gmail's short snippet - fetch it
+        # for EVERY mail type here, unconditionally, not just delay_or_devanning
+        # (which used to be the only branch that called this). An arrival_notice/
+        # delivery_order mail whose SF number was only in the body - not the subject,
+        # not the snippet, not even the attached document - was previously always
+        # reported as "no SF number found" even though it was right there in the mail.
+        body_text = _lcl_fetch_body_text(raw_id, subject=subject)
+        if body_text:
+            text_for_extraction = f"{text_for_extraction}\n{body_text}"
+
         doc_type_label = _LCL_MAIL_TYPE_DOC_TYPE.get(mail_type)
         data_bytes, doc_mime, doc_filename = None, None, None
         if doc_type_label:
@@ -519,10 +531,10 @@ def lcl_arrivals_process():
                 results.append(res_entry)
                 continue
         elif mail_type == "delay_or_devanning":
-            body_text = _lcl_fetch_body_text(raw_id, subject=subject)
-            if body_text:
-                text_for_extraction = f"{text_for_extraction}\n{body_text}"
-
+            # Body text was already fetched above (for every mail type, including
+            # this one) - the devanning date almost never appears there anyway; see
+            # below for why this branch's own job is reading the attachment(s).
+            #
             # This mail type's whole PURPOSE is a (possibly new) devanning date, but
             # that date is almost never in the email body/subject in a machine-
             # parseable form (real example: the body just says "delivering tomorrow" -
