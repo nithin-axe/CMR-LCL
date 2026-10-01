@@ -1120,6 +1120,15 @@ def classify_documents_cmr(message_id, subject, body_html, attachments, force=Fa
     extraction, and every downstream consumer work exactly as before."""
     # 1. Check filename hints first to identify CMR document
     cmr_index = None
+    # Populated in step 2 below (PDF text content) with attachments positively
+    # identified as NOT the CMR document (e.g. a Status Update). Declared here, not
+    # scoped inside step 2's "if cmr_index is None" block, so the final "fallback to
+    # index 0" further down can also respect it - it previously couldn't see this set
+    # at all and would force-label a confirmed-non-CMR attachment (like a Status
+    # Update PDF) as "Cmr" simply for being the only/first non-Excel attachment, which
+    # is exactly what caused a Status Update document to show up tagged "Cmr" in the
+    # Operations review panel.
+    other_indices = set()
     for i, att in enumerate(attachments or []):
         if _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
             continue
@@ -1129,7 +1138,6 @@ def classify_documents_cmr(message_id, subject, body_html, attachments, force=Fa
 
     # 2. Check PDF text content to accurately identify CMR vs Status Update / Other
     if cmr_index is None:
-        other_indices = set()
         for i, att in enumerate(attachments or []):
             if _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
                 continue
@@ -1151,10 +1159,14 @@ def classify_documents_cmr(message_id, subject, body_html, attachments, force=Fa
                     cmr_index = i
                     break
 
-    # Fallback to index 0 if all attachments were non-Excel
+    # Fallback to the first non-Excel attachment NOT already confirmed as a Status
+    # Update/Other by step 2, in case step 3 above never ran (cmr_index was still None
+    # after the filename-hint pass but step 2's text scan found no PDF to read - e.g.
+    # no data_bytes yet). Still respects other_indices so this can't undo step 2's
+    # positive "this one is NOT the CMR document" finding.
     if cmr_index is None:
         for i, att in enumerate(attachments or []):
-            if not _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
+            if not _is_excel_attachment(att.get("filename", ""), att.get("mime", "")) and i not in other_indices:
                 cmr_index = i
                 break
 

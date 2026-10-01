@@ -2018,6 +2018,7 @@
 
                 // Filenames and document types structured list for clear user verification
                 const filenames = job.doc_filenames || [];
+                const attIndices = job.doc_attachment_indices || [];
                 const docTypesList = job.doc_types || [];
                 let docsBreakdown = "";
                 if (docTypesList.length > 0) {
@@ -2026,9 +2027,19 @@
                         <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 6px;">
                             ${docTypesList.map((t, i) => {
                                 const fn = filenames[i] || `Attachment #${i + 1}`;
+                                // Same /operations/document_file?inline=1 link the running-job
+                                // view uses (see the doc_types-driven "Download:" line further
+                                // down) - this review panel previously showed the filename as
+                                // plain text with no way to actually open it before confirming.
+                                const idx = attIndices[i];
+                                const idxParam = (idx === null || idx === undefined) ? "" : `&attachment_index=${encodeURIComponent(idx)}`;
+                                const viewUrl = `/api/operations/document_file?message_id=${encodeURIComponent(job.message_id)}&doc_type=${encodeURIComponent(t)}${idxParam}&subject=${encodeURIComponent(job.subject || "")}&inline=1`;
                                 return `<div style="display: flex; align-items: center; justify-content: space-between; background: var(--surface-muted, #f8fafc); padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0);">
                                     <span style="font-weight: 500; word-break: break-all; color: var(--text-primary);"><i class="fa-solid fa-file-pdf" style="color: #ef4444; margin-right: 6px;"></i> ${escapeHtml(fn)}</span>
-                                    <span class="row-doctype-badge" style="margin-left: 12px; flex-shrink: 0;">${escapeHtml(t)}</span>
+                                    <span style="display: flex; align-items: center; gap: 8px; margin-left: 12px; flex-shrink: 0;">
+                                        <a class="job-download-link" title="View '${escapeHtml(fn)}' in the browser" href="${viewUrl}" target="_blank"><i class="fa-solid fa-eye"></i> View</a>
+                                        <span class="row-doctype-badge">${escapeHtml(t)}</span>
+                                    </span>
                                 </div>`;
                             }).join("")}
                         </div>
@@ -2749,7 +2760,7 @@
                             <i class="fa-solid fa-triangle-exclamation"></i>
                             <span class="process-banner-text">"${escapeHtml(awaitingNoRecord.subject || awaitingNoRecord.message_id)}" - no record found on Shypple for any
                             extracted container (tried: ${escapeHtml((awaitingNoRecord.tried_containers || []).join(", "))}).
-                            Mark unread and move to <b>label:${escapeHtml(awaitingNoRecord.no_record_label || "")}</b>?</span>
+                            Mark unread + <b>purple star</b> and move to <b>label:${escapeHtml(awaitingNoRecord.no_record_label || "")}</b>?</span>
                             <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm</button>
                             <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;
@@ -3841,6 +3852,21 @@
             .catch(() => { });
     }
 
+    // --- Auto-Refresh Countdown Timer Logic --- (moved here, ABOVE the page-load kickoff
+    // right below: fetchEmailsLive()/startAutoRefreshCountdown() reference these on their very
+    // first call, and a `let`/`const` referenced before its own declaration line has executed
+    // throws "Cannot access X before initialization" (temporal dead zone) instead of just being
+    // undefined. That uncaught error used to abort ALL remaining top-level script execution for
+    // the rest of this page load - which meant the 10s auto-refresh interval, the shell-update
+    // poll, the auto-classify interval, and the real-time SSE connection below never got set up
+    // at all, and every later call to manualRefreshWithTimer() ("Update Live" button) threw the
+    // same error on its very first line before ever reaching fetchEmailsLive(true) - matching
+    // the reported "Update Live does nothing" and "no live fetch on open" symptoms exactly.)
+    const AUTO_REFRESH_INTERVAL_SEC = 10;
+    let refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
+    let isRefreshTimerPaused = false;
+    let refreshTimerInterval = null;
+
     // Call immediately on page load, and start the 10-second countdown timer for auto-refresh
     fetchEmailsLive();
     startAutoRefreshCountdown();
@@ -3960,12 +3986,6 @@
         el.style.display = "none";
         el.innerHTML = "";
     }
-
-    // --- Auto-Refresh Countdown Timer Logic ---
-    const AUTO_REFRESH_INTERVAL_SEC = 10;
-    let refreshCountdownSeconds = AUTO_REFRESH_INTERVAL_SEC;
-    let isRefreshTimerPaused = false;
-    let refreshTimerInterval = null;
 
     function updateRefreshTimerUI() {
         const countdownEl = document.getElementById("refresh-timer-countdown");

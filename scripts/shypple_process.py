@@ -2002,11 +2002,12 @@ def _star_source_email(job, color):
     try:
         params = urllib.parse.urlencode({"id": raw_id, "color": color})
         url = f"{GMAIL_CONTROL_SERVER}/star_color?{params}"
-        # Matches open_gmail.py's /star_color internal wait (widened to 70s - the star
-        # click loop there can retry up to 12 times, ~50s+ worst case, well past the
-        # old 20s here which was reporting "timed out" on an otherwise-still-working
-        # click loop).
-        with urllib.request.urlopen(url, timeout=75) as response:
+        # Must exceed open_gmail.py's own /star_color wait (widened to 100s - the star
+        # click loop's real worst case, including retries on "element not attached to
+        # the DOM", can run close to ~90s; a shorter client timeout here would abort
+        # the connection and report a spurious failure while that server-side wait was
+        # still genuinely in progress - reproduced live at 70.5s with the old timeouts).
+        with urllib.request.urlopen(url, timeout=105) as response:
             result = json.loads(response.read().decode("utf-8"))
         if result.get("success"):
             log_job(job, f"Marked with a {color} star.")
@@ -2028,16 +2029,15 @@ def _star_source_email(job, color):
 
 
 def _mark_source_email_unread(job):
-    """Ask the Gmail automation to mark this job's source email UNREAD - used
-    whenever a document was actually (re-)uploaded/changed, for BOTH the CMR and LCL
-    Arrivals/Release pipelines alike, so a successfully-processed email stays
-    visibly flagged - unread + yellow star (alongside the star _star_source_email
-    already sets) - for the "Process yellow-starred" -> "Processed - India filing"
-    sweep, per the operator's explicit rule. An outcome where NOTHING needed
-    uploading (already identical) uses _mark_source_email_read instead - see that
-    function. Records job["read_status"] ("done"/"failed") and job["read_action"] =
-    "unread" (which action actually ran, since both functions share this field) so
-    the dashboard can show the right wording."""
+    """Ask the Gmail automation to mark this job's source email UNREAD - used for
+    error/needs-manual-attention outcomes (e.g. no document found, no date found,
+    shipment fails verification) in BOTH the CMR and LCL/FCL Arrivals/Release
+    pipelines, so the email stays visibly flagged - unread + yellow star (alongside
+    the star _star_source_email already sets) - until someone looks at it. A
+    successful terminal outcome (document uploaded, or already up to date) uses
+    _mark_source_email_read instead - see that function. Records
+    job["read_status"] ("done"/"failed") and job["read_action"] = "unread" so the
+    dashboard can show the right wording."""
     message_id = job.get("message_id") or ""
     with STATE_LOCK:
         job["read_action"] = "unread"
@@ -2050,9 +2050,19 @@ def _mark_source_email_unread(job):
         return
     raw_id = message_id[len("pw_"):]
     try:
-        params = urllib.parse.urlencode({"id": raw_id, "type": "mark_unread"})
+        # subject lets the control server's row-not-found recovery search for this
+        # mail instead of giving up outright - without it, a row that scrolled out of
+        # the currently-rendered list (e.g. after _star_source_email's up-to-~70s
+        # click-cycling loop runs first, during which the list can reorder/refresh)
+        # can never be found, and this call fails even though the mail is still
+        # right there in the label, just not in the current DOM snapshot.
+        params = urllib.parse.urlencode({"id": raw_id, "type": "mark_unread", "subject": job.get("subject", "")})
         url = f"{GMAIL_CONTROL_SERVER}/action?{params}"
-        with urllib.request.urlopen(url, timeout=30) as response:
+        # Must exceed the control server's own 40s wait (see /action's handler) - the
+        # subject-search fallback can legitimately take close to that, and a shorter
+        # client timeout would abort the request (reporting a spurious failure here)
+        # while the server-side click/search was still genuinely in progress.
+        with urllib.request.urlopen(url, timeout=45) as response:
             result = json.loads(response.read().decode("utf-8"))
         if result.get("success"):
             log_job(job, "Marked the source email as unread.")
@@ -2072,14 +2082,13 @@ def _mark_source_email_unread(job):
 
 def _mark_source_email_read(job):
     """Ask the Gmail automation to mark this job's source email READ - used whenever
-    NOTHING needed uploading because it's already identical (CMR's up_to_date
-    branch of _verify_and_upload_documents; LCL's "already uploaded and identical"
-    branch of handle_arrival_notice/handle_delivery_order, via
-    verify_existing_document_before_upload), for both pipelines alike. An outcome
-    where a document IS actually (re-)uploaded uses _mark_source_email_unread
-    instead - see that function. Records job["read_status"] ("done"/"failed") and
-    job["read_action"] = "read" (which action actually ran, since both functions
-    share this field) so the dashboard can show the right wording."""
+    processing finishes successfully, whether or not a document was actually
+    (re-)uploaded (already-identical/up-to-date counts too), for BOTH the CMR and
+    LCL/FCL Arrivals/Release pipelines, per the operator's explicit rule. An outcome
+    that needs manual attention (nothing usable found, verification failed, etc.)
+    uses _mark_source_email_unread instead - see that function. Records
+    job["read_status"] ("done"/"failed") and job["read_action"] = "read" so the
+    dashboard can show the right wording."""
     message_id = job.get("message_id") or ""
     with STATE_LOCK:
         job["read_action"] = "read"
@@ -2091,9 +2100,16 @@ def _mark_source_email_read(job):
         return
     raw_id = message_id[len("pw_"):]
     try:
-        params = urllib.parse.urlencode({"id": raw_id, "type": "mark_read"})
+        # subject lets the control server's row-not-found recovery search for this
+        # mail instead of giving up outright - see the matching comment in
+        # _mark_source_email_unread above for why this matters (the row can scroll
+        # out of the currently-rendered list during _star_source_email's slow
+        # click-cycling loop, which always runs right before this call).
+        params = urllib.parse.urlencode({"id": raw_id, "type": "mark_read", "subject": job.get("subject", "")})
         url = f"{GMAIL_CONTROL_SERVER}/action?{params}"
-        with urllib.request.urlopen(url, timeout=30) as response:
+        # Must exceed the control server's own 40s wait - see the matching comment in
+        # _mark_source_email_unread above.
+        with urllib.request.urlopen(url, timeout=45) as response:
             result = json.loads(response.read().decode("utf-8"))
         if result.get("success"):
             log_job(job, "Marked the source email as read.")
@@ -2193,7 +2209,11 @@ def _flag_no_record_source_email(job):
     """Ask the Gmail automation to mark this job's source email unread and move it to
     NO_RECORD_LABEL - fires when every container search came back with a genuinely
     empty results table (the shipment isn't in Shypple at all, not just an org/ETA
-    mismatch on real rows). Records job["no_record_status"] ("flagged"/"failed")."""
+    mismatch on real rows). Per the operator's explicit rule, the caller also gives
+    the email a purple star right after this call (same star used for the
+    cancelled/deleted-shipment outcome) - not done in here, since _star_source_email
+    is a separate, already-shared helper the caller (process_one_job) also uses for
+    its other outcomes. Records job["no_record_status"] ("flagged"/"failed")."""
     message_id = job.get("message_id") or ""
     if not message_id.startswith("pw_"):
         log_job(job, "Skipped unread/relabel: this email isn't from the delegated mailbox the "
@@ -2311,10 +2331,10 @@ def handle_delay_or_devanning(page, job):
         job["extracted_devanning_date"] = extracted_date or ""
 
     if not extracted_date:
-        log_job(job, "There is no date in the mail and the document for delay/devanning - marking read + "
+        log_job(job, "There is no date in the mail and the document for delay/devanning - marking unread + "
                      "yellow star anyway so it can be reviewed manually.")
         _star_source_email(job, "yellow")
-        _mark_source_email_read(job)
+        _mark_source_email_unread(job)
         set_job_status(job, "lcl_no_date_found", reason="There is no date in the mail and the document for delay and devanning.")
         return
 
@@ -2401,10 +2421,10 @@ def handle_arrival_notice(page, job):
         job["message_id"], "Arrival notice", subject=job.get("subject", ""), label=_LCL_LABEL_KEY
     )
     if file_bytes is None:
-        log_job(job, f"Could not fetch the Arrival notice attachment ({fetch_error}) - marking read + "
+        log_job(job, f"Could not fetch the Arrival notice attachment ({fetch_error}) - marking unread + "
                      "yellow star anyway so it isn't lost, but this needs a manual look.")
         _star_source_email(job, "yellow")
-        _mark_source_email_read(job)
+        _mark_source_email_unread(job)
         set_job_status(job, "lcl_no_document_found",
                        reason=f"Could not fetch the Arrival notice attachment: {fetch_error}")
         return
@@ -2472,6 +2492,9 @@ def handle_arrival_notice(page, job):
         return
 
     log_job(job, "Arrival notice uploaded successfully.")
+    # Per the operator's explicit rule, a completed upload marks the mail READ (not
+    # unread) - matches the CMR pipeline's _verify_and_upload_documents and
+    # handle_delivery_order's primary upload below.
     _star_source_email(job, "yellow")
     _mark_source_email_read(job)
     set_job_status(job, "lcl_done", phase="Done - Arrival notice processed")
@@ -2816,7 +2839,7 @@ def handle_delivery_order(page, job):
             phase="The document was already uploaded, don't need to upload",
             reason="The document was already uploaded, don't need to upload",
         )
-        log_job(job, f"Delivery order document ('{existing_do.get('filename')}') was already uploaded on Shypple. No need to upload.")
+        log_job(job, f"Delivery order document ('{existing_do.get('filename')}') was already uploaded on Shypple. No need to upload. Marked email read + yellow star.")
         return
 
     # 3. Containers tab check
@@ -2840,10 +2863,10 @@ def handle_delivery_order(page, job):
         job["message_id"], "Delivery order", subject=job.get("subject", ""), label=_LCL_LABEL_KEY
     )
     if file_bytes is None:
-        log_job(job, f"Could not fetch the Delivery order attachment ({fetch_error}) - marking read + "
+        log_job(job, f"Could not fetch the Delivery order attachment ({fetch_error}) - marking unread + "
                      "yellow star anyway so it isn't lost, but this needs a manual look.")
         _star_source_email(job, "yellow")
-        _mark_source_email_read(job)
+        _mark_source_email_unread(job)
         set_job_status(job, "lcl_no_document_found",
                        reason=f"Could not fetch the Delivery order attachment: {fetch_error}")
         return
@@ -2912,7 +2935,7 @@ def handle_delivery_order(page, job):
 
         log_job(job, f"Additional Delivery order document {extra_i}/{total_extra} uploaded successfully.")
 
-    _mark_source_email_unread(job)
+    _mark_source_email_read(job)
     _star_source_email(job, "yellow")
     set_job_status(job, "lcl_done", phase="Done - Delivery order uploaded successfully")
 
@@ -2984,6 +3007,9 @@ def handle_delivery_order(page, job):
             continue
         log_job(job, f"Additional Delivery order document {extra_i}/{total_extra} uploaded successfully.")
 
+    # The primary Delivery order document was already uploaded earlier in this function
+    # (see the _mark_source_email_read call right after it succeeds, above) - per the
+    # operator's explicit rule, a completed upload marks the mail READ.
     _star_source_email(job, "yellow")
     _mark_source_email_read(job)
     set_job_status(job, "lcl_done", phase="Done - Delivery order processed")
@@ -3031,9 +3057,9 @@ def process_lcl_arrival_job(page, job):
         if not info.get("isLcl"):
             reasons.append(f"load type is '{info.get('loadType') or 'unknown'}', not LCL")
         reason_str = " and ".join(reasons)
-        log_job(job, f"Shipment fails verification ({reason_str}) - marking read + yellow star, no further action.")
+        log_job(job, f"Shipment fails verification ({reason_str}) - marking unread + yellow star, no further action.")
         _star_source_email(job, "yellow")
-        _mark_source_email_read(job)
+        _mark_source_email_unread(job)
         set_job_status(job, "skipped_cluster_or_fcl", reason=reason_str)
         return
 
@@ -3057,6 +3083,12 @@ def process_lcl_arrival_job(page, job):
 
 def process_one_job(page, job):
     containers = job.get("containers") or []
+    # Tracks whether `containers` already came FROM Shypple's own Containers tab (via
+    # the SF-number route right below, or the retry further down after a genuinely
+    # empty search) rather than from the email/document's own extracted text - once
+    # that's happened, retrying via SF number again on a second empty result would
+    # just repeat the exact same lookup pointlessly.
+    sf_fallback_used = False
     if not containers:
         # No container number could be extracted from the email/document at all - very
         # plausible for a CMR that's a scanned, HANDWRITTEN form (hard for OCR/the LLM
@@ -3096,40 +3128,99 @@ def process_one_job(page, job):
             return
 
         containers = found_containers
+        sf_fallback_used = True
         with STATE_LOCK:
             job["containers"] = containers
         log_job(job, f"Read container number(s) from Shypple's Containers tab via SF number '{sf_number}': {containers}.")
 
     set_job_status(job, "processing", phase="Searching containers")
     current_year = datetime.now().year
-    match, tried, diagnostics = None, [], []
-    any_candidates_seen = False
-    cancelled_or_deleted_seen = False
-    for raw_container in containers:
-        clean = re.sub(r"[\s\-]", "", raw_container).upper()
-        tried.append(clean)
-        log_job(job, f"Searching Shypple for container {clean}...")
-        page.goto(f"{SHYPPLE_ADMIN_BASE}/admin/shipments")
-        page.wait_for_selector("#shipment-search", timeout=15000)
-        page.fill("#shipment-search", clean)
-        page.press("#shipment-search", "Enter")
-        page.wait_for_selector(".table-responsive", timeout=15000)
-        page.wait_for_timeout(500)
-        result = find_matching_shipment(page, current_year)
-        if result.get("matched"):
-            match = result["chosen"]
-            job["matched_container"] = clean
-            if result.get("ambiguous"):
-                log_job(job, f"Multiple current-year results for {clean} - picked "
-                              f"organization '{match.get('org') or '(none)'}'.")
-            break
-        candidates = result.get("candidates", [])
-        if candidates:
-            any_candidates_seen = True
-        for candidate in candidates:
-            diagnostics.append(f"{clean} -> {_describe_candidate_issue(candidate, current_year)}")
-            if candidate.get("cancelledOrDeleted"):
-                cancelled_or_deleted_seen = True
+
+    def _search_containers(container_list):
+        """One pass of the search-box loop below, factored out so it can be re-run with
+        a different container list (see the SF-number retry right after the first call)
+        without duplicating the loop body."""
+        match, tried, diagnostics = None, [], []
+        any_candidates_seen = False
+        cancelled_or_deleted_seen = False
+        for raw_container in container_list:
+            clean = re.sub(r"[\s\-]", "", raw_container).upper()
+            tried.append(clean)
+            log_job(job, f"Searching Shypple for container {clean}...")
+            page.goto(f"{SHYPPLE_ADMIN_BASE}/admin/shipments")
+            page.wait_for_selector("#shipment-search", timeout=15000)
+            page.fill("#shipment-search", clean)
+            page.press("#shipment-search", "Enter")
+            page.wait_for_selector(".table-responsive", timeout=15000)
+            page.wait_for_timeout(500)
+            result = find_matching_shipment(page, current_year)
+            if result.get("matched"):
+                match = result["chosen"]
+                job["matched_container"] = clean
+                if result.get("ambiguous"):
+                    log_job(job, f"Multiple current-year results for {clean} - picked "
+                                  f"organization '{match.get('org') or '(none)'}'.")
+                break
+            candidates = result.get("candidates", [])
+            if candidates:
+                any_candidates_seen = True
+            for candidate in candidates:
+                diagnostics.append(f"{clean} -> {_describe_candidate_issue(candidate, current_year)}")
+                if candidate.get("cancelledOrDeleted"):
+                    cancelled_or_deleted_seen = True
+        return match, tried, diagnostics, any_candidates_seen, cancelled_or_deleted_seen
+
+    match, tried, diagnostics, any_candidates_seen, cancelled_or_deleted_seen = _search_containers(containers)
+
+    # A genuinely empty results table (not an org/ETA mismatch, not cancelled/deleted)
+    # for EVERY extracted container is exactly as consistent with "the extraction is
+    # wrong" as it is with "no record exists" - a scanned/handwritten CMR can have its
+    # container number misread (e.g. real-world case: "MSBU7509380" printed on the
+    # document and in the subject line, extracted as "MCBU7509380" - a one-character
+    # OCR/LLM misread that searches for a container that was never going to exist).
+    # Per the same "Shypple's own Containers tab is the authoritative source, not a
+    # re-parse of the email/PDF text" principle the empty-containers branch above
+    # already applies, retry via the mail's SF number (if we haven't already gone
+    # through that route to GET here) before concluding there's no record at all -
+    # this mirrors LCL's Delivery Order upload using Shypple's Containers tab instead
+    # of trusting the regex-extracted container number.
+    if not match and not cancelled_or_deleted_seen and not any_candidates_seen and not sf_fallback_used:
+        sf_number = job.get("sf_number")
+        if sf_number:
+            set_job_status(job, "processing", phase=f"No match for extracted container(s) - trying SF number {sf_number}")
+            log_job(job, f"No Shypple record for extracted container(s) ({', '.join(tried)}) - this can mean the "
+                         f"extraction misread the container (common for a scanned/handwritten CMR), not that "
+                         f"there's genuinely no record - trying SF number '{sf_number}' instead.")
+            found = find_shipment_by_sf_number(page, sf_number)
+            if found.get("success"):
+                page.goto(SHYPPLE_ADMIN_BASE + found["shipment_path"])
+                page.wait_for_timeout(1000)
+                open_containers_tab(page)
+                labels = page.eval_on_selector_all(".containers-list a", "els => els.map(e => e.textContent.trim())")
+                found_containers = sorted(set(filter(None, (extract_container_from_label(l) for l in labels))))
+                if found_containers:
+                    log_job(job, f"Found shipment via SF number '{sf_number}' - re-searching with its real "
+                                 f"container(s) read off the Containers tab: {found_containers}.")
+                    # Reassign the LOCAL `containers` too, not just job["containers"] - every
+                    # caller downstream of this function (_verify_and_upload_documents's
+                    # email-vs-shipment container comparison, the document upload's container
+                    # picker) reads the local variable, not the job dict. Leaving it as the
+                    # original wrong extraction here previously meant the shipment matched
+                    # correctly but the upload step still tried to pick the WRONG (email-
+                    # extracted) container on the form and reported it "not found" - the real
+                    # bug this whole fallback exists to route around, just moved one step later.
+                    containers = found_containers
+                    with STATE_LOCK:
+                        job["containers"] = containers
+                    sf_match, sf_tried, sf_diagnostics, sf_any_candidates_seen, sf_cancelled_or_deleted_seen = _search_containers(found_containers)
+                    tried = tried + sf_tried
+                    diagnostics = diagnostics + sf_diagnostics
+                    match, any_candidates_seen, cancelled_or_deleted_seen = sf_match, sf_any_candidates_seen, sf_cancelled_or_deleted_seen
+                else:
+                    log_job(job, f"Shipment found via SF number '{sf_number}' but its Containers tab is empty - "
+                                 "nothing to re-search with.")
+            else:
+                log_job(job, f"SF number '{sf_number}' lookup also failed: {found.get('error')}")
 
     if not match:
         reason = "; ".join(diagnostics) if diagnostics else "no search results at all"
@@ -3155,14 +3246,19 @@ def process_one_job(page, job):
             )
             log_job(job, "Every container search came back with a genuinely empty results table "
                           "(not just an org/ETA mismatch). Waiting for confirmation before marking "
-                          f"unread and moving to label:{NO_RECORD_LABEL}.")
+                          f"unread + purple star and moving to label:{NO_RECORD_LABEL}.")
             if not _wait_for_confirmation(job):
                 set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
                 log_job(job, "Skipped by operator - left as-is, no label change.")
                 return
             set_job_status(job, "processing", phase="Marking unread and moving label...")
             _flag_no_record_source_email(job)
+            # Final status set before the star, same reasoning as the cancelled/deleted
+            # branch above - _star_source_email's row-list retry can take up to ~70s in
+            # the worst case, and the dashboard should show this job as done right away
+            # instead of looking stuck mid-"processing" for that whole window.
             set_job_status(job, "no_match", tried_containers=tried, reason=reason)
+            _star_source_email(job, "purple")
         else:
             set_job_status(job, "no_match", tried_containers=tried, reason=reason)
             log_job(job, f"No matching shipment found after trying: {', '.join(tried)}. {reason}")
@@ -3405,11 +3501,11 @@ def _verify_and_upload_documents(page, job, match, containers):
 
     if not needs_upload:
         # Nothing needed uploading - every extracted type was already present and
-        # verified to match content-for-content - so mark READ rather than unread
+        # verified to match content-for-content - mark read + yellow star
         _star_source_email(job, "yellow")
         _mark_source_email_read(job)
         set_job_status(job, "up_to_date", phase="Done - documents present and verified")
-        log_job(job, "All extracted document types are present on Shypple and verified as matching.")
+        log_job(job, "All extracted document types are present on Shypple and verified as matching. Marked email read + yellow star.")
         return
 
     # Per operator request: Single manual verification workflow for CMR process.
@@ -3490,12 +3586,11 @@ def _verify_and_upload_documents(page, job, match, containers):
         # Per the operator's explicit rule: every document uploaded successfully ->
         # mark the source email with a yellow star, matching this account's existing
         # "Process yellow-starred" -> "Processed - India filing" sweep, so a
-        # successfully-processed email is ready to move there - and mark it UNREAD
-        # (this was "mark read" before; the operator reversed that rule so a
-        # successfully-processed email stays visibly flagged - unread + yellow star -
-        # instead of disappearing into the read state). Matches the LCL Arrivals/
-        # Release pipeline's already-existing unread+star terminal rule (see the
-        # comment above handle_delay_or_devanning) - both pipelines now agree.
+        # successfully-processed email is ready to move there - and mark it READ (a
+        # completed upload, like the "nothing needed uploading" branch above, ends in
+        # read + yellow star). Matches the LCL Arrivals/Release pipeline's terminal
+        # rule (see handle_delay_or_devanning/handle_arrival_notice/
+        # handle_delivery_order) - both pipelines agree.
         _star_source_email(job, "yellow")
         _mark_source_email_read(job)
         set_job_status(job, "uploaded", phase="Done - all document(s) uploaded")

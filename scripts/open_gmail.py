@@ -6,7 +6,7 @@ import queue
 import hashlib
 import re
 from playwright.sync_api import sync_playwright
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -759,43 +759,60 @@ def _row_is_unread(page, message_id):
     }""", {"msgId": message_id})
 
 
-def _restore_unread(page, message_id, subject=""):
-    """Retried, verified restore of a message's unread flag after a
-    classification-only open marked it read as a Gmail side effect.
+def _set_read_state(page, message_id, want_unread, subject="", initial_retries=2, search_retries=3):
+    """Retried, VERIFIED mark_read/mark_unread - the general mechanism behind
+    _restore_unread (want_unread=True) and every mark_read/mark_unread request routed
+    through the control server's generic /action endpoint (the dashboard's manual
+    toggle button, and shypple_process.py's _mark_source_email_read/
+    _mark_source_email_unread - the terminal "what read state does this mail end up
+    in" calls the whole pipeline's documented rules depend on).
 
-    A single perform_list_action attempt right after navigating back to the list was
-    unreliable in practice - the list is often still re-rendering at that moment (a row
-    present in one DOM snapshot has its node swapped out by the next), which either
-    throws "Element is not attached to the DOM" mid-click or reports "row_not_found"
-    even though the row is about to reappear. perform_list_action re-queries the DOM
-    from scratch on every call (no handle carried across calls), so simply retrying it
-    with a short backoff rides out that re-render window instead of giving up on the
-    first pass. Each apparent success is also verified by re-reading the row's own
-    unread class - a click that "succeeds" without error but lands a beat too early can
-    still leave the row read.
+    A single perform_list_action attempt is NOT reliable enough to trust blindly, for
+    two independent reasons, both observed live against this real account:
+    1. Timing - the list is often still re-rendering right after a click/navigation (a
+       row present in one DOM snapshot has its node swapped out by the next), which
+       either throws "Element is not attached to the DOM" mid-click or reports
+       "row_not_found" even though the row is about to reappear.
+    2. perform_list_action's own documented risk - its checkbox/toolbar-button clicks
+       fall back to a synthetic JS .click() when the real (trusted) Playwright click
+       times out, and that function's own docstring already warns "some Gmail toolbar
+       buttons (mark as read, in particular) silently no-op on synthetic/untrusted
+       clicks even though the element and handler are found correctly" - i.e. exactly
+       a click that reports {"success": True} while changing nothing. Reproduced live:
+       5 consecutive mark_unread calls each returned {"success": true} while the row
+       stayed read every single time - the earlier code had no way to notice this,
+       since it never re-checked the actual row state afterward.
+
+    perform_list_action re-queries the DOM from scratch on every call (no handle
+    carried across calls), so simply retrying it with a short backoff and VERIFYING
+    the row's own unread class after each apparent success catches both failure modes
+    instead of trusting a click that merely didn't throw.
 
     If the row genuinely isn't in the currently-rendered list (scrolled out of the
     initially-loaded page - the live list only ever holds whatever's presently
-    rendered, not a persistent index), falls back to the same subject-search technique
-    fetch_email_body itself uses to relocate a row, then returns to the label's list
-    view so the caller's next iteration starts from a clean state."""
+    rendered, not a persistent index) and a subject was given, falls back to the same
+    subject-search technique fetch_email_body itself uses to relocate a row, then
+    returns to the label's list view so the caller's next iteration starts from a
+    clean state."""
+    action = "mark_unread" if want_unread else "mark_read"
+
     def _attempt(retries):
         outcome = {"success": False, "error": "not attempted"}
         for attempt in range(retries):
-            outcome = perform_list_action(page, "mark_unread", message_id)
+            outcome = perform_list_action(page, action, message_id)
             if outcome.get("success"):
                 page.wait_for_timeout(100)
-                still_unread = _row_is_unread(page, message_id)
-                if still_unread is not False:  # True, or None (can't verify) - accept
+                current_unread = _row_is_unread(page, message_id)
+                if current_unread is None or current_unread == want_unread:  # verified, or can't verify - accept
                     return outcome
-                outcome = {"success": False, "error": "click reported success but row still shows read"}
+                outcome = {"success": False, "error": "click reported success but row's read state did not change"}
             page.wait_for_timeout(200)
         return outcome
 
-    undo = _attempt(2)
+    undo = _attempt(initial_retries)
     if undo.get("success"):
         return undo
-    
+
     if undo.get("error") != "row_not_found" or not subject:
         return undo
 
@@ -803,7 +820,7 @@ def _restore_unread(page, message_id, subject=""):
     if not snippet:
         return undo
 
-    print(f"[Server] _restore_unread: row for '{message_id}' not in the current view - "
+    print(f"[Server] _set_read_state: row for '{message_id}' not in the current view - "
           f"searching by subject '{snippet}' instead.")
     base_url = LABEL_URL.split("#", 1)[0]
     search_url = f"{base_url}#search/{quote(chr(34) + snippet + chr(34))}"
@@ -815,10 +832,17 @@ def _restore_unread(page, message_id, subject=""):
         waited_ms += 500
         if _row_exists_by_id(page, message_id):
             break
-    undo = _attempt(3)
+    undo = _attempt(search_retries)
     page.goto(_list_view_url_for(page))
     page.wait_for_timeout(300)
     return undo
+
+
+def _restore_unread(page, message_id, subject=""):
+    """Retried, verified restore of a message's unread flag after a
+    classification-only open marked it read as a Gmail side effect. See
+    _set_read_state for how the retry/verify actually works."""
+    return _set_read_state(page, message_id, True, subject=subject)
 
 
 # Gmail's star icon cycles through whichever marker colors are enabled in this
@@ -834,6 +858,32 @@ _STAR_COLOR_KEYWORDS = {
     "green": ["green", "groen"],
 }
 
+# Confirmed via direct DOM inspection (same methodology as _YELLOW_STAR_CLASS_TOKEN,
+# now extended to every color set_star_color actually needs to reach) - captured live
+# by instrumenting set_star_color to log each click attempt's real class/aria-label
+# and running it through a full color cycle on this account's real Gmail markers:
+#   attempt class='T-KT xj Uieduc' aria='Starred'                        (plain/no color)
+#   attempt class='T-KT xl Uieduc' aria='Starred with "orange-star"'
+#   attempt class='T-KT xn Uieduc' aria='Starred with "red-star"'
+#   attempt class='T-KT xm Uieduc' aria='Starred with "purple-star"'
+#   attempt class='T-KT N6cuDc Uieduc' aria='Starred with "yellow-star"'
+#   attempt class='T-KT xk Uieduc' aria='Starred with "green-star"'
+#   attempt class='T-KT xc Uieduc' aria='Starred with "blue-info"'
+# A confirmed class token is a far more reliable signal than the title/aria-label text
+# keywords above (no dependence on the aria-label being present/in English/Dutch at
+# the moment it's read) - used as the PRIMARY check everywhere a color is verified,
+# with _STAR_COLOR_KEYWORDS kept as the fallback for degrading gracefully if Gmail's
+# obfuscated class names ever drift again (same reasoning _YELLOW_STAR_CLASS_TOKEN's
+# own fallback exists for).
+_STAR_COLOR_CLASS_TOKENS = {
+    "yellow": "N6cuDc",
+    "orange": "xl",
+    "red": "xn",
+    "purple": "xm",
+    "green": "xk",
+    "blue": "xc",
+}
+
 
 def classify_star_descriptor(descriptor, star_class=""):
     """Star color for the live scrape loop, so the dashboard reflects whatever color is
@@ -841,12 +891,15 @@ def classify_star_descriptor(descriptor, star_class=""):
     browser, not just via set_star_color).
 
     _YELLOW_STAR_CLASS_TOKEN (confirmed via direct DOM inspection) is the PRIMARY,
-    authoritative signal for yellow/plain-starred - trust it first. Title/aria-label
-    text is used ONLY to detect an explicitly-named non-yellow color (blue etc.); it
-    must NOT fall back to "contains the word star/ster -> assume yellow" - that
-    generic fallback previously marked EVERY row as yellow-starred, because this
-    build's NOT-starred tooltip also contains "ster" (Dutch: the action-oriented
-    phrasing, e.g. "mark with star", not a state description)."""
+    authoritative signal for yellow-starred - trust it first. Title/aria-label text is
+    used as a SECONDARY fallback for yellow (specifically "yellow"/"geel", never bare
+    "star"/"ster") so a future Gmail class-name change degrades gracefully instead of
+    going blind again - a stale class token is exactly what broke this before (see
+    _YELLOW_STAR_CLASS_TOKEN's own comment). It must NOT fall back to "contains the
+    word star/ster -> assume yellow" - that generic fallback previously marked EVERY
+    row as yellow-starred, because this build's NOT-starred tooltip also contains
+    "ster" (Dutch: the action-oriented phrasing, e.g. "mark with star", not a state
+    description)."""
     if _YELLOW_STAR_CLASS_TOKEN in (star_class or "").split():
         return "yellow"
 
@@ -854,8 +907,6 @@ def classify_star_descriptor(descriptor, star_class=""):
     if not d:
         return None
     for color, keywords in _STAR_COLOR_KEYWORDS.items():
-        if color == "yellow":
-            continue
         if any(kw in d for kw in keywords):
             return color
     return None
@@ -881,7 +932,7 @@ def _find_star_element(page, message_id):
         row_el.hover(timeout=3000)
     except Exception:
         pass
-    return row_el.query_selector(".T-KT")
+    return row_el.query_selector('.T-KT, td.apU span.aXw, td.apU span[role="button"]')
 
 
 def set_star_color(page, message_id, color, max_clicks=12):
@@ -897,28 +948,37 @@ def set_star_color(page, message_id, color, max_clicks=12):
     attached to the DOM" on the second+ click, since Gmail replaces the star's DOM
     node after each click.
 
-    "yellow" is checked via _YELLOW_STAR_CLASS_TOKEN (the same confirmed, authoritative
-    signal classify_star_descriptor uses for reading), NOT the title/aria-label text
-    keywords every other color uses - the plain/default star's title/aria-label does
-    NOT reliably contain the word "yellow"/"geel" (per classify_star_descriptor's own
-    docstring, this build's generic star tooltip text is ambiguous), so text matching
-    alone would exhaust every attempt and always report failure for yellow."""
+    Every color in _STAR_COLOR_CLASS_TOKENS (confirmed via direct DOM inspection - see
+    that dict's own comment for how) is checked PRIMARILY by its class token, with the
+    title/aria-label text keywords as a secondary fallback - unlike a bare "star"/
+    "ster" fallback (which would false-positive on the NOT-starred tooltip's action
+    text), a color-specific word like "yellow"/"orange"/etc. only appears when the star
+    actually is that color, so it's safe to check for every color. The text fallback
+    exists because a stale class token (Gmail's obfuscated build changed after
+    _YELLOW_STAR_CLASS_TOKEN was first confirmed) previously made yellow undetectable
+    by class alone, silently exhausting every click attempt and always reporting
+    failure - the same could happen to any of the other tokens in the future."""
     keywords = _STAR_COLOR_KEYWORDS.get(color, [color])
+    class_token = _STAR_COLOR_CLASS_TOKENS.get(color)
+
+    def _matches(el):
+        cls = (el.get_attribute("class") or "")
+        if class_token and class_token in cls.split():
+            return True
+        descriptor = " ".join([
+            (el.get_attribute("title") or ""),
+            (el.get_attribute("aria-label") or ""),
+            cls,
+        ]).lower()
+        return any(kw in descriptor for kw in keywords)
+
     try:
         star_el = _find_star_element(page, message_id)
         if star_el is None:
             return {"success": False, "error": "row_not_found_or_star_not_found"}
 
         # Fast path: check if the star is already the requested color!
-        star_class = (star_el.get_attribute("class") or "")
-        if color == "yellow" and _YELLOW_STAR_CLASS_TOKEN in star_class.split():
-            return {"success": True, "attempts": 0}
-        descriptor = " ".join([
-            (star_el.get_attribute("title") or ""),
-            (star_el.get_attribute("aria-label") or ""),
-            star_class,
-        ]).lower()
-        if color != "yellow" and any(kw in descriptor for kw in keywords):
+        if _matches(star_el):
             return {"success": True, "attempts": 0}
 
         for attempt in range(max_clicks):
@@ -939,18 +999,22 @@ def set_star_color(page, message_id, color, max_clicks=12):
             if star_el is None:
                 return {"success": False, "error": "row_not_found_or_star_not_found"}
 
-            star_class = (star_el.get_attribute("class") or "")
-            if color == "yellow":
-                if _YELLOW_STAR_CLASS_TOKEN in star_class.split():
-                    return {"success": True, "attempts": attempt + 1}
-                continue
-            descriptor = " ".join([
-                (star_el.get_attribute("title") or ""),
-                (star_el.get_attribute("aria-label") or ""),
-                star_class,
-            ]).lower()
-            if any(kw in descriptor for kw in keywords):
+            if _matches(star_el):
                 return {"success": True, "attempts": attempt + 1}
+
+        # One last, longer-delayed check before giving up. Reproduced live: a run
+        # that exhausted all max_clicks attempts and reported failure here still
+        # showed the correct color moments later on the next periodic scrape - the
+        # last click DID land, Gmail's own DOM/class update just hadn't caught up
+        # within that attempt's 250ms wait yet (this account's click cycling took
+        # ~60s+ for a full pass through its enabled markers, well beyond the couple
+        # of seconds this loop budgets in total wait time, so a slow final update is
+        # plausible under that load). Cheap to check once more before reporting a
+        # false failure - a real "color not enabled" case still fails correctly here.
+        page.wait_for_timeout(1500)
+        star_el = _find_star_element(page, message_id)
+        if star_el is not None and _matches(star_el):
+            return {"success": True, "attempts": max_clicks}
 
         return {
             "success": False,
@@ -1287,11 +1351,17 @@ def delete_forwarded_mail(message_id):
     return {"success": True}
 
 
-# The class token confirmed (via direct DOM inspection, before the "blue star" marker
-# was ever introduced) to mean this account's plain/default star - i.e. yellow. Unlike
-# the Forward/Send/Labels selectors, this one is NOT a guess: it's the same check
-# fetch_email_body's scrape loop already uses for the boolean "starred" flag.
-_YELLOW_STAR_CLASS_TOKEN = "T-KT-Jp"
+# The class token confirmed (via direct DOM inspection) to mean this account's
+# "yellow-star" marker specifically (aria-label 'Starred with "yellow-star"').
+# Unlike the Forward/Send/Labels selectors, this one is NOT a guess. Re-confirmed
+# 2026-09-28 after Gmail's obfuscated build changed and the old token ("T-KT-Jp")
+# stopped matching anything - that silently broke both reading the star color for
+# the dashboard AND set_star_color's own success check for "yellow" (see
+# classify_star_descriptor's docstring: text matching isn't used as a fallback for
+# yellow, so a stale class token meant yellow could never be detected at all, not
+# just detected slowly). If this ever goes stale again, re-inspect the star span's
+# class attribute in the real Gmail DOM for a row explicitly set to yellow.
+_YELLOW_STAR_CLASS_TOKEN = "N6cuDc"
 
 
 _ROW_COLOR_MATCH_JS = """
@@ -1299,7 +1369,7 @@ _ROW_COLOR_MATCH_JS = """
         const rows = Array.from(document.querySelectorAll('tr.zA'));
         let count = 0;
         for (const row of rows) {
-            const starEl = row.querySelector('.T-KT');
+            const starEl = row.querySelector('.T-KT, td.apU span.aXw, td.apU span[role="button"]');
             if (!starEl) continue;
             let matches = false;
             if (yellowToken) {
@@ -1307,7 +1377,15 @@ _ROW_COLOR_MATCH_JS = """
                 matches = cls.includes(yellowToken);
             }
             if (!matches && keywords.length) {
-                const descriptor = ((starEl.getAttribute('title') || '') + ' ' + (starEl.getAttribute('aria-label') || '')).toLowerCase();
+                const nodes = [starEl, ...Array.from(starEl.querySelectorAll('*'))];
+                const attrList = [];
+                for (const node of nodes) {
+                    for (const attr of ['aria-label', 'title', 'data-tooltip', 'alt', 'class']) {
+                        const val = node.getAttribute(attr);
+                        if (val) attrList.push(val);
+                    }
+                }
+                const descriptor = attrList.join(' ').toLowerCase();
                 matches = keywords.some(kw => descriptor.includes(kw));
             }
             if (matches) count++;
@@ -1353,7 +1431,7 @@ def move_starred_to_label(page, target_label, color="yellow"):
                 const rows = Array.from(document.querySelectorAll('tr.zA'));
                 let selected = 0;
                 for (const row of rows) {
-                    const starEl = row.querySelector('.T-KT');
+                    const starEl = row.querySelector('.T-KT, td.apU span.aXw, td.apU span[role="button"]');
                     if (!starEl) continue;
                     let matches = false;
                     if (args.yellowToken) {
@@ -1361,7 +1439,15 @@ def move_starred_to_label(page, target_label, color="yellow"):
                         matches = cls.includes(args.yellowToken);
                     }
                     if (!matches && args.keywords.length) {
-                        const descriptor = ((starEl.getAttribute('title') || '') + ' ' + (starEl.getAttribute('aria-label') || '')).toLowerCase();
+                        const nodes = [starEl, ...Array.from(starEl.querySelectorAll('*'))];
+                        const attrList = [];
+                        for (const node of nodes) {
+                            for (const attr of ['aria-label', 'title', 'data-tooltip', 'alt', 'class']) {
+                                const val = node.getAttribute(attr);
+                                if (val) attrList.push(val);
+                            }
+                        }
+                        const descriptor = attrList.join(' ').toLowerCase();
                         matches = args.keywords.some(kw => descriptor.includes(kw));
                     }
                     if (!matches) continue;
@@ -1483,9 +1569,17 @@ def process_color_starred_forward(page, color, to_email, add_label):
                 const rows = Array.from(document.querySelectorAll('tr.zA'));
                 const ids = [];
                 for (const row of rows) {
-                    const starEl = row.querySelector('.T-KT');
+                    const starEl = row.querySelector('.T-KT, td.apU span.aXw, td.apU span[role="button"]');
                     if (!starEl) continue;
-                    const descriptor = ((starEl.getAttribute('title') || '') + ' ' + (starEl.getAttribute('aria-label') || '')).toLowerCase();
+                    const nodes = [starEl, ...Array.from(starEl.querySelectorAll('*'))];
+                    const attrList = [];
+                    for (const node of nodes) {
+                        for (const attr of ['aria-label', 'title', 'data-tooltip', 'alt', 'class']) {
+                            const val = node.getAttribute(attr);
+                            if (val) attrList.push(val);
+                        }
+                    }
+                    const descriptor = attrList.join(' ').toLowerCase();
                     if (!keywords.some(kw => descriptor.includes(kw))) continue;
                     const idEl = row.querySelector('[data-legacy-last-message-id]');
                     const legacyId = idEl ? idEl.getAttribute('data-legacy-last-message-id') : null;
@@ -1653,11 +1747,49 @@ class PlaywrightControlServer(BaseHTTPRequestHandler):
 
         if parsed.path == "/switch_label":
             target_lbl = query.get("label", ["a-cmr"])[0].strip() or "a-cmr"
-            print(f"[Server] Request to switch label -> '{target_lbl}'")
-            req = ActionRequest("switch_label", "", label_name=target_lbl)
-            request_queue.put(req)
-            fulfilled = req.event.wait(timeout=20)
-            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            # Answered directly on THIS handler thread (ThreadingHTTPServer gives each
+            # connection its own thread) when nothing is actually changing, WITHOUT ever
+            # touching request_queue - not just to skip the slow navigate+rescrape path
+            # (see the matching short-circuit in main()'s queue-draining loop for that),
+            # but because going through the queue at all means waiting for whatever the
+            # single Playwright-owning thread happens to be doing RIGHT NOW, which can
+            # legitimately take up to ~70s (a star-color click cycle) or ~20s (a document
+            # download) - every OTHER request, including a fast same-label check, would
+            # sit blocked behind it regardless of how quick its own processing is once
+            # it's finally dequeued. Reproduced live even after the queue-side
+            # short-circuit alone: 6 concurrent /api/emails polls fired while a single
+            # star-color call was in flight ALL timed out at 15s, because none of them
+            # ever got a turn on the one thread that can drain the queue. Reading the
+            # already-fresh scrape file directly here sidesteps that thread entirely -
+            # safe because it's a plain read of a JSON file the periodic background
+            # scrape loop (main()'s own 2s cadence) keeps current independently, and
+            # `active_label`/`gmail_page_ref.url` are only ever read here, never written
+            # from this thread.
+            try:
+                lbl_key, _ = normalize_label(target_lbl)
+            except Exception:
+                lbl_key = target_lbl
+            already_active = (
+                lbl_key == active_label and gmail_page_ref is not None
+                and not gmail_page_ref.is_closed()
+                and get_label_url(lbl_key) in (gmail_page_ref.url or "")
+            )
+            if already_active:
+                scraped_list = []
+                try:
+                    scraped_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "scraped_emails.json"))
+                    with open(scraped_path, "r", encoding="utf-8") as f:
+                        scraped_list = json.load(f)
+                except Exception:
+                    pass
+                result = {"success": True, "label": active_label, "count": len(scraped_list), "url": gmail_page_ref.url}
+            else:
+                print(f"[Server] Request to switch label -> '{target_lbl}'")
+                req = ActionRequest("switch_label", "", label_name=target_lbl)
+                request_queue.put(req)
+                fulfilled = req.event.wait(timeout=20)
+                result = req.result if fulfilled else {"success": False, "error": "timeout"}
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1739,10 +1871,17 @@ class PlaywrightControlServer(BaseHTTPRequestHandler):
 
         if parsed.path == "/action":
             action = query.get("type", [""])[0].strip()
+            subject = query.get("subject", [""])[0]
             print(f"[Server] Request to perform action '{action}' for message id: '{message_id}'")
-            req = ActionRequest(action, message_id)
+            req = ActionRequest(action, message_id, subject=subject)
             request_queue.put(req)
-            fulfilled = req.event.wait(timeout=25)
+            # mark_read/mark_unread can fall back to a subject search (see
+            # _set_read_state) if the row scrolled out of the currently-rendered list -
+            # that fallback alone can take up to ~13s (an 8s poll plus retries), so 25s
+            # only leaves a slim margin on top of the initial quick-retry attempts.
+            # Other actions (toggle_star/archive/delete) have no such fallback and
+            # finish fast, so widening this uniformly costs them nothing.
+            fulfilled = req.event.wait(timeout=40)
             result = req.result if fulfilled else {"success": False, "error": "timeout"}
 
             self.send_response(200)
@@ -1768,17 +1907,49 @@ class PlaywrightControlServer(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result).encode("utf-8"))
             return
 
+        if parsed.path == "/debug_dashboard":
+            req = ActionRequest("debug_dashboard", "")
+            request_queue.put(req)
+            fulfilled = req.event.wait(timeout=15)
+            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
+        if parsed.path == "/debug_stars":
+            req = ActionRequest("debug_stars", message_id)
+            request_queue.put(req)
+            fulfilled = req.event.wait(timeout=15)
+            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
         if parsed.path == "/star_color":
             color = query.get("color", [""])[0].strip()
             print(f"[Server] Request to star (color='{color}') message id: '{message_id}'")
             req = ActionRequest("star_color", message_id, color=color)
             request_queue.put(req)
-            # set_star_color retries up to 12 clicks (each bounded at 4s) to cycle
-            # through Gmail's marker colors - worst case ~50s+, well past the old 20s
-            # wait here, which is exactly why shypple_process.py logged "Could not
-            # reach the Gmail automation to set the star: timed out" even though the
-            # click loop was very likely still legitimately working.
-            fulfilled = req.event.wait(timeout=70)
+            # set_star_color retries up to 12 clicks, each attempt bounded by a 4s
+            # click timeout PLUS a fresh _find_star_element re-query (which itself
+            # hovers with up to a 3s timeout) PLUS a 250ms wait - worst case, if
+            # several attempts hit the slow path (e.g. "element not attached to the
+            # DOM", a real, reproduced failure mode), that's up to ~7.25s/attempt *
+            # 12 = ~87s, plus the one extra delayed re-check after the loop exhausts
+            # (see set_star_color's own final check) - comfortably past the previous
+            # 70s wait here. Reproduced live: a real run took 70.5s and got cut off
+            # with {"error": "timeout"} from THIS wait, not from set_star_color
+            # itself giving up - the click loop was very likely still running or had
+            # just finished. 100s gives real headroom over the ~87-90s worst case.
+            fulfilled = req.event.wait(timeout=100)
             result = req.result if fulfilled else {"success": False, "error": "timeout"}
 
             self.send_response(200)
@@ -1931,26 +2102,66 @@ def do_scrape_emails(page, force_write=False, label=None, output_path=None):
 
                 const isUnread = row.classList.contains('zE');
 
-                // Yellow is matched via the confirmed class token ('T-KT-Jp', same as
-                // _YELLOW_STAR_CLASS_TOKEN/classify_star_descriptor elsewhere in this
-                // file) - NOT text, since the plain star's title/aria-label doesn't
-                // reliably say "yellow". Other colors are matched via word-boundary-safe
-                // regex against the title/aria-label text, NOT plain .includes() - a
-                // naive substring check previously matched "red" against every row's
-                // generic "(Not) starred" tooltip (the word "starred" itself contains
-                // "red" - "star-RED"), which is why every row was showing as red
-                // regardless of its actual color or even whether it was starred at all.
-                const starEl = row.querySelector('.T-KT');
+                // Yellow is matched primarily via the confirmed class token ('N6cuDc',
+                // same as _YELLOW_STAR_CLASS_TOKEN/classify_star_descriptor elsewhere in
+                // this file - re-confirmed 2026-09-28 after Gmail's obfuscated build
+                // changed and the old token stopped matching), with a word-boundary-safe
+                // "yellow"/"geel" text fallback so a future class-name change degrades
+                // gracefully instead of silently going blind again. Other colors are
+                // matched via word-boundary-safe regex against the title/aria-label text,
+                // NOT plain .includes() - a naive substring check previously matched
+                // "red" against every row's generic "(Not) starred" tooltip (the word
+                // "starred" itself contains "red" - "star-RED"), which is why every row
+                // was showing as red regardless of its actual color or even whether it
+                // was starred at all. That same naive-substring risk is why the yellow
+                // text fallback checks "yellow"/"geel" specifically, not bare "star"/
+                // "ster" (which also appears in the NOT-starred tooltip's action text).
+                const starEl = row.querySelector('.T-KT, td.apU span.aXw, td.apU span[role="button"]');
                 let starColor = null;
+                let isStarred = false;
                 if (starEl) {
                     const clsTokens = (starEl.getAttribute('class') || '').split(/\\s+/);
-                    const descriptor = ((starEl.getAttribute('title') || '') + ' ' + (starEl.getAttribute('aria-label') || '')).toLowerCase();
-                    if (clsTokens.includes('T-KT-Jp')) starColor = 'yellow';
-                    else if (/\\bblue\\b|\\bblauw\\b/.test(descriptor)) starColor = 'blue';
-                    else if (/\\bred\\b|\\brood\\b/.test(descriptor)) starColor = 'red';
-                    else if (/\\borange\\b|\\boranje\\b/.test(descriptor)) starColor = 'orange';
-                    else if (/\\bgreen\\b|\\bgroen\\b/.test(descriptor)) starColor = 'green';
-                    else if (/\\bpurple\\b|\\bpaars\\b/.test(descriptor)) starColor = 'purple';
+                    const attrList = [];
+                    const nodes = [starEl, ...Array.from(starEl.querySelectorAll('*'))];
+                    for (const node of nodes) {
+                        for (const attr of ['aria-label', 'title', 'data-tooltip', 'alt', 'class']) {
+                            const val = node.getAttribute(attr);
+                            if (val) attrList.push(val);
+                        }
+                    }
+                    const descriptor = attrList.join(' ').toLowerCase();
+
+                    const isNotStarred = (
+                        descriptor.includes('not starred') ||
+                        descriptor.includes('niet gesterd') ||
+                        descriptor.includes('not_starred') ||
+                        descriptor.includes('unstarred')
+                    ) && !descriptor.includes('starred with') && !descriptor.includes('gesterd met');
+
+                    if (!isNotStarred) {
+                        if (clsTokens.includes('N6cuDc') || /\\b(yellow|geel|gele|yellow-star|yellow_star|yellow-bang)\\b/i.test(descriptor)) {
+                            starColor = 'yellow';
+                            isStarred = true;
+                        } else if (/\\b(blue|blauw|blauwe|blue-star|blue_star|blue-info)\\b/i.test(descriptor)) {
+                            starColor = 'blue';
+                            isStarred = true;
+                        } else if (/\\b(red|rood|rode|red-star|red_star|red-bang)\\b/i.test(descriptor)) {
+                            starColor = 'red';
+                            isStarred = true;
+                        } else if (/\\b(orange|oranje|orange-star|orange_star|orange-guillemet)\\b/i.test(descriptor)) {
+                            starColor = 'orange';
+                            isStarred = true;
+                        } else if (/\\b(green|groen|groene|green-star|green_star|green-check)\\b/i.test(descriptor)) {
+                            starColor = 'green';
+                            isStarred = true;
+                        } else if (/\\b(purple|paars|paarse|purple-star|purple_star|purple-question)\\b/i.test(descriptor)) {
+                            starColor = 'purple';
+                            isStarred = true;
+                        } else if (/starred|gesterd|star|ster/i.test(descriptor) || starEl.querySelector('img:not([alt*="not" i])')) {
+                            starColor = 'yellow';
+                            isStarred = true;
+                        }
+                    }
                 }
 
                 const idEl = row.querySelector('[data-legacy-last-message-id]');
@@ -1978,8 +2189,8 @@ def do_scrape_emails(page, force_write=False, label=None, output_path=None):
                     snippet,
                     date,
                     unread: isUnread,
-                    starred: starColor !== null,
-                    starColor,
+                    starred: isStarred,
+                    starColor: starColor,
                     hasAttachment: hasAtt,
                     attachmentNames: names
                 };
@@ -2141,8 +2352,27 @@ def search_lcl_label(page, query):
 
 
 def start_http_server():
-    server = HTTPServer(("127.0.0.1", 40005), PlaywrightControlServer)
-    print("Playwright control server running on http://127.0.0.1:40005")
+    # ThreadingHTTPServer, not plain HTTPServer - the plain server handles ONE
+    # connection fully (accept, read, run the handler, write the response) before it
+    # will even accept the next one. Every actual Playwright action already goes
+    # through request_queue + a per-request threading.Event, which serializes the
+    # real browser work correctly on the one thread that's allowed to touch
+    # Playwright's sync API - but the plain HTTPServer meant a single SLOW handler
+    # (a ~70s star-click cycle, a 20s document download, the multi-second
+    # switch_label round trip) blocked the OS-level accept() for its entire
+    # duration, so no other request - not even a fast one - could even be picked up
+    # in the meantime. Reproduced live: a burst of concurrent /api/emails polls
+    # where most of them got no response at all until a 15s client-side timeout,
+    # while the control server was still tied up on one earlier request; the
+    # dashboard's own log showed this as a run of "[WinError 10053] An established
+    # connection was aborted" right after several back-to-back requests. Safe to
+    # switch: do_GET handler threads only ever touch Playwright by enqueueing an
+    # ActionRequest and waiting on its own Event - the actual page/browser access
+    # still happens exclusively on the single main-loop thread draining
+    # request_queue, so this doesn't introduce any new concurrent Playwright access.
+    server = ThreadingHTTPServer(("127.0.0.1", 40005), PlaywrightControlServer)
+    server.daemon_threads = True
+    print("Playwright control server running on http://127.0.0.1:40005 (threaded)")
     server.serve_forever()
 
 
@@ -2276,6 +2506,69 @@ def main():
                                 )
                             elif req.action == "star_color":
                                 req.result = set_star_color(_resolve_action_page(req.message_id), req.message_id, req.color)
+                            elif req.action == "debug_dashboard":
+                                # Temporary diagnostic (sibling of debug_stars): inspects the
+                                # LIVE rendered dashboard tab itself (the same `page` this
+                                # script navigated to localhost:40000, sitting in
+                                # context.pages[0]) rather than raw Gmail - to check whether
+                                # a confirmed-correct backend value (scraped_emails.json's
+                                # starred/starColor fields) is actually reaching the DOM, or
+                                # whether the frontend's poll/render is stuck/erroring. Forces
+                                # one fetchEmailsLive() call first so the snapshot reflects a
+                                # fresh fetch, not whatever was last rendered.
+                                try:
+                                    page.evaluate("() => { if (typeof fetchEmailsLive === 'function') fetchEmailsLive(false); }")
+                                except Exception as dash_err:
+                                    print(f"[Server] debug_dashboard: forcing a refresh failed: {dash_err}")
+                                page.wait_for_timeout(1500)
+                                req.result = {"success": True, "info": page.evaluate("""() => {
+                                    const rows = Array.from(document.querySelectorAll('.gmail-row'));
+                                    return {
+                                        url: window.location.href,
+                                        title: document.title,
+                                        hasFetchFn: typeof fetchEmailsLive === 'function',
+                                        containerExists: !!document.querySelector('.mail-items-container'),
+                                        containerHTMLSnippet: (document.querySelector('.mail-items-container') || {}).innerHTML
+                                            ? document.querySelector('.mail-items-container').innerHTML.slice(0, 300)
+                                            : null,
+                                        rowCount: rows.length,
+                                        rows: rows.slice(0, 8).map(row => {
+                                            const starEl = row.querySelector('.gmail-star');
+                                            return {
+                                                subject: row.getAttribute('data-subject'),
+                                                dataStarred: row.getAttribute('data-starred'),
+                                                dataStarColor: row.getAttribute('data-star-color'),
+                                                starIconClass: starEl ? starEl.getAttribute('class') : null,
+                                            };
+                                        }),
+                                    };
+                                }""")}
+                            elif req.action == "debug_stars":
+                                # Temporary diagnostic: dumps the real, live star element
+                                # for every currently-rendered row (class/aria-label/title/
+                                # data-tooltip/outerHTML) - added to get GROUND TRUTH after
+                                # a DevTools-captured class token (_YELLOW_STAR_CLASS_TOKEN)
+                                # turned out to still not match real message-row markup even
+                                # after updating it, so guessing again blind wasn't worth it.
+                                dbg_page = _resolve_action_page(req.message_id) if req.message_id else gmail_page_ref
+                                req.result = {"success": True, "rows": dbg_page.evaluate("""() => {
+                                    const rows = Array.from(document.querySelectorAll('tr.zA'));
+                                    return rows.slice(0, 25).map(row => {
+                                        const subjEl = row.querySelector('span.bog');
+                                        const starEl = row.querySelector('.T-KT');
+                                        if (!starEl) return { subject: subjEl ? subjEl.innerText.trim() : '', star: null };
+                                        return {
+                                            subject: subjEl ? subjEl.innerText.trim() : '',
+                                            star: {
+                                                className: starEl.getAttribute('class') || '',
+                                                ariaLabel: starEl.getAttribute('aria-label') || '',
+                                                title: starEl.getAttribute('title') || '',
+                                                dataTooltip: starEl.getAttribute('data-tooltip') || '',
+                                                outerHTML: (starEl.outerHTML || '').slice(0, 500),
+                                            },
+                                        };
+                                    });
+                                }""")}
                             elif req.action == "move_starred_to_label":
                                 req.result = move_starred_to_label(gmail_page_ref, req.target_label, req.color)
                             elif req.action == "process_color_starred_forward":
@@ -2297,10 +2590,45 @@ def main():
                             elif req.action == "switch_label":
                                 raw_lbl = getattr(req, "label_name", "a-cmr")
                                 lbl_key, lbl_gmail = normalize_label(raw_lbl)
+                                target_url = get_label_url(lbl_key)
+
+                                # Short-circuit when nothing is actually changing - this
+                                # action fires on EVERY /api/emails poll (every dashboard
+                                # auto-refresh, every open tab, the "Update Live" button),
+                                # not just on a real label switch, and the full path below
+                                # (sidebar click + a fixed 1.5s wait + a forced rescrape)
+                                # blocks this control server's single-threaded request
+                                # queue for 1.5s+ EVERY time regardless of whether the
+                                # label changed. Under concurrent polling that backlog
+                                # compounds - later requests in the queue can exceed the
+                                # Flask side's own 30s urlopen timeout before this server
+                                # ever gets to them, which aborts the client socket and
+                                # makes THIS server's eventual response write throw
+                                # ConnectionAbortedError (ground truth from a real log:
+                                # a burst of "[WinError 10053] An established connection
+                                # was aborted" right after several "Request to switch
+                                # label -> 'a-cmr'" lines back to back). The periodic
+                                # background scrape loop (main()'s own 2s cadence) already
+                                # keeps data/scraped_emails.json fresh independently of
+                                # this action, so a same-label call has nothing useful to
+                                # do here anyway - it was only ever a page-load safety net
+                                # for an actual label change, not a per-poll no-op.
+                                if lbl_key == active_label and gmail_page_ref and not gmail_page_ref.is_closed() \
+                                        and target_url in (gmail_page_ref.url or ""):
+                                    scraped_list = []
+                                    try:
+                                        scraped_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "scraped_emails.json"))
+                                        with open(scraped_path, "r", encoding="utf-8") as f:
+                                            scraped_list = json.load(f)
+                                    except Exception:
+                                        pass
+                                    req.result = {"success": True, "label": active_label, "count": len(scraped_list), "url": gmail_page_ref.url}
+                                    req.event.set()
+                                    continue
+
                                 active_label = lbl_key
-                                target_url = get_label_url(active_label)
                                 print(f"[Browser Navigation] Switching to label: key='{lbl_key}', gmail='{lbl_gmail}', url='{target_url}'")
-                                
+
                                 if gmail_page_ref and not gmail_page_ref.is_closed():
                                     try:
                                         # Try JS click on matching sidebar item first
@@ -2343,15 +2671,23 @@ def main():
                                     req.result = {"success": True, "results": results}
                                 else:
                                     req.result = {"success": False, "error": f"No dedicated tab available to search label '{getattr(req, 'label_name', '')}'."}
+                            elif req.action in ("mark_read", "mark_unread"):
+                                # Routed through the same retried/verified mechanism
+                                # _restore_unread already used internally - a bare
+                                # perform_list_action call here previously reported
+                                # {"success": true} on a click that silently didn't
+                                # change anything (see _set_read_state's docstring for
+                                # the reproduced, 5-consecutive-calls live evidence),
+                                # which is exactly what scripts/shypple_process.py's
+                                # _mark_source_email_read/_mark_source_email_unread -
+                                # this pipeline's terminal "what read state does this
+                                # mail end up in" calls - rely on being trustworthy.
+                                req.result = _set_read_state(
+                                    _resolve_action_page(req.message_id), req.message_id,
+                                    req.action == "mark_unread",
+                                )
                             else:
-                                # Catch-all: toggle_star, mark_read, mark_unread, archive,
-                                # delete - exactly the actions
-                                # scripts/shypple_process.py's _star_source_email (toggle
-                                # path)/_mark_source_email_unread use, for EITHER
-                                # pipeline's messages (mark_read is still a supported
-                                # action here for the dashboard's own manual read/unread
-                                # toggle - shypple_process.py itself just never calls it,
-                                # since both pipelines' terminal rule is unread+star).
+                                # Catch-all: toggle_star, archive, delete.
                                 req.result = perform_list_action(
                                     _resolve_action_page(req.message_id), req.action, req.message_id
                                 )
@@ -2380,7 +2716,21 @@ def main():
                             lcl_page_ref, force_write=True, label=LCL_LABEL_KEY, output_path=_LCL_SCRAPED_PATH
                         )
 
-                page.wait_for_timeout(200)
+                # A plain Python sleep, not page.wait_for_timeout(200) - this is pure
+                # loop pacing, unrelated to the dashboard tab's own content. The old
+                # code tied it to `page` (context.pages[0], the dashboard tab
+                # specifically) even though gmail_page_ref/lcl_page_ref right above are
+                # already guarded with .is_closed() checks precisely because a tab can
+                # close on its own (the user closes it, or Chrome discards a background
+                # tab under memory pressure) - `page` had no such guard, so the instant
+                # the dashboard tab closed, THIS line threw "Target page, context or
+                # browser has been closed" on the very next loop iteration, which
+                # crashed the ENTIRE main loop (context.close() in `finally` below tears
+                # down every tab, including the still-perfectly-fine Gmail/LCL ones) -
+                # taking the whole automation down over something as small as one tab
+                # being closed. Reproduced live: this exact exception, this exact line,
+                # ended a real run mid-session with no user action on Gmail/LCL at all.
+                time.sleep(0.2)
         except Exception as e:
             print(f"[Main loop] Unexpected error, shutting down: {e}")
         finally:

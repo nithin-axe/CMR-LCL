@@ -205,11 +205,17 @@ def _extract_attachment_docs(rec, scraped_email=None):
         if fallback_type and fallback_type != "No DOC":
             docs = [{"type": fallback_type, "attachment_index": 0}]
 
-    # If there are 2 or more document attachments:
-    # Ensure one CMR document retains 'Cmr' type, while non-CMR attachments retain their specific
-    # classified type (e.g. Phytosanitary certificate, Packing List, Commercial invoice, etc.)
-    # or default to 'Other' if their type is unspecified or duplicate 'Cmr'.
-    if len(docs) >= 2:
+    # If there are 2 or more document attachments and MORE THAN ONE of them is already
+    # typed "Cmr" (classify_documents_cmr is supposed to pick at most one, but this is
+    # a safety net for whatever record source got here), keep only the best-evidenced
+    # one as "Cmr" and downgrade the rest to "Other" - a real CMR mail has exactly one
+    # CMR document. Deliberately does NOT invent a "Cmr" when none of the attachments
+    # were actually classified as one: this used to unconditionally default cmr_idx to
+    # 0 when no filename/type evidence existed, which force-labeled a mail's ONLY real
+    # attachment (already correctly classified e.g. "Other") as "Cmr" just for being
+    # first in the list - exactly what caused a non-CMR document (e.g. a Status Update)
+    # to still show up tagged "Cmr" in the Operations review panel.
+    if len(docs) >= 2 and sum(1 for d in docs if d.get("type") == "Cmr") > 1:
         cmr_idx = None
         for i, d in enumerate(docs):
             fn = (d.get("filename") or "").lower()
@@ -221,15 +227,10 @@ def _extract_attachment_docs(rec, scraped_email=None):
                 if d.get("type") == "Cmr":
                     cmr_idx = i
                     break
-        if cmr_idx is None:
-            cmr_idx = 0
 
         for i, d in enumerate(docs):
-            if i == cmr_idx:
-                d["type"] = "Cmr"
-            else:
-                current_type = d.get("type") or "Other"
-                d["type"] = "Other" if current_type == "Cmr" else current_type
+            if i != cmr_idx and d.get("type") == "Cmr":
+                d["type"] = "Other"
 
     return docs
 
