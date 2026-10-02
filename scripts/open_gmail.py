@@ -881,8 +881,38 @@ _STAR_COLOR_CLASS_TOKENS = {
     "red": "xn",
     "purple": "xm",
     "green": "xk",
-    "blue": "xc",
+    # "xj" - the account's CURRENT "blue" marker, re-confirmed via direct DOM
+    # inspection: class="T-KT xj Uieduc" aria-label="Starred" (no color word at all -
+    # this account's Settings > General > Stars enabled-marker list has changed since
+    # "xc" (aria-label 'Starred with "blue-info"') was first confirmed earlier the same
+    # day; "xc" is no longer what this account's blue marker renders as, and is kept
+    # below only in case that setting ever reverts. If this goes stale again, re-
+    # inspect the real DOM for whichever star the account currently shows as blue.
+    "blue": "xj",
 }
+
+# Every state this account's full click cycle actually visits, confirmed the same way
+# as _STAR_COLOR_CLASS_TOKENS above (live DOM capture, one click at a time). Beyond the
+# 6 "plain color star" markers in _STAR_COLOR_CLASS_TOKENS, Gmail's "all 12 stars" set
+# also includes "xc" (this account's PREVIOUSLY-confirmed blue marker, "blue-info" -
+# superseded by "xj" above but kept recognized in case the account's enabled-marker
+# set changes back) plus 4 more distinct icons whose aria-label TEXT contains their
+# base color as a substring (e.g. 'Starred with "red-bang"' contains "red") -
+# set_star_color's keyword-text fallback was matching those as if they WERE the plain
+# color star, collapsing two genuinely different Gmail states into the same cycle-
+# detection key. That made the click loop think a full cycle had completed (a key it
+# had already "seen" recurring) far short of the real cycle length, cutting off
+# before ever reaching colors later in the actual sequence - reproduced live: asked
+# for 'purple' and the loop gave up after only 2 distinct keys, nowhere near a real
+# 11-state cycle. Keying every state by its own class token (unique by construction)
+# instead of by color name removes the collision entirely.
+_ALL_STAR_CLASS_TOKENS = dict({token: kind for kind, token in _STAR_COLOR_CLASS_TOKENS.items()}, **{
+    "xc": "blue",
+    "xg": "red-bang",
+    "xe": "orange-guillemet",
+    "xh": "yellow-bang",
+    "xd": "green-check",
+})
 
 
 def classify_star_descriptor(descriptor, star_class=""):
@@ -932,7 +962,15 @@ def _find_star_element(page, message_id):
         row_el.hover(timeout=3000)
     except Exception:
         pass
-    return row_el.query_selector('.T-KT, td.apU span.aXw, td.apU span[role="button"]')
+    # Narrowed to just .T-KT - every confirmed real star state (all 12 "In use"
+    # markers, re-confirmed directly against this account's own Settings > General >
+    # Stars page) carries this class. The broader "td.apU span.aXw, td.apU
+    # span[role='button']" alternatives were added earlier as a hover-visibility
+    # fallback, but repeated clicks were only ever toggling between 2 states despite
+    # ALL 12 markers being enabled - consistent with those alternatives sometimes
+    # matching a DIFFERENT element in the same cell than the one .T-KT already finds,
+    # rather than genuinely advancing Gmail's own color cycle.
+    return row_el.query_selector('.T-KT')
 
 
 def set_star_color(page, message_id, color, max_clicks=12):
@@ -943,10 +981,18 @@ def set_star_color(page, message_id, color, max_clicks=12):
     caller should check ``success`` and log accordingly, not assume it silently
     worked.
 
-    Re-queries the star element fresh on every attempt (see _find_star_element) -
-    reusing one handle across multiple clicks previously threw "Element is not
-    attached to the DOM" on the second+ click, since Gmail replaces the star's DOM
-    node after each click.
+    Clicks a FIXED screen position (the star's bounding-box centre, captured once)
+    via page.mouse.click, not star_el.click() re-resolved through _find_star_element
+    on every attempt - that function hovers the row before locating the star (needed
+    once, for accounts where the star only renders on hover), and hovering again
+    before every single click turned out to reset Gmail's own click-cycle tracking,
+    so repeated clicks only ever toggled between 2 states regardless of which color
+    was requested - see the loop body's own comment for the live, reproduced
+    evidence. Coordinate clicks sidestep this entirely and also never throw "Element
+    is not attached to the DOM" (a real, reproduced failure mode of the old
+    element-handle approach, since Gmail replaces the star's DOM node after every
+    click) - state is still re-read fresh after each click via a plain, hover-free
+    re-query (_requery below).
 
     Every color in _STAR_COLOR_CLASS_TOKENS (confirmed via direct DOM inspection - see
     that dict's own comment for how) is checked PRIMARILY by its class token, with the
@@ -959,18 +1005,59 @@ def set_star_color(page, message_id, color, max_clicks=12):
     by class alone, silently exhausting every click attempt and always reporting
     failure - the same could happen to any of the other tokens in the future."""
     keywords = _STAR_COLOR_KEYWORDS.get(color, [color])
-    class_token = _STAR_COLOR_CLASS_TOKENS.get(color)
+
+    def _state(el):
+        """(kind, key): kind is 'none' (not starred), 'plain' (starred, no color word
+        - Gmail's default star), a color name (settable via set_star_color), or one of
+        the 4 extra marker names in _ALL_STAR_CLASS_TOKENS that aren't individually
+        settable but still need their own distinct identity for cycle detection. key
+        uniquely identifies the state for cycle detection - keyed by class token
+        whenever the token is one of the known, confirmed ones (unique by
+        construction), which is what actually fixes the collision described above.
+        Read in one evaluate so it's a single consistent DOM snapshot."""
+        try:
+            cls, descriptor = el.evaluate("""el => {
+                const attrs = [];
+                for (const n of [el, ...Array.from(el.querySelectorAll('*'))]) {
+                    for (const a of ['aria-label', 'title', 'data-tooltip', 'alt']) {
+                        const v = n.getAttribute(a);
+                        if (v) attrs.push(v);
+                    }
+                }
+                return [el.getAttribute('class') || '', attrs.join(' ')];
+            }""")
+        except Exception:
+            return ("unknown", "unknown")
+        descriptor = descriptor.lower()
+        tokens = cls.split()
+        for token, kind in _ALL_STAR_CLASS_TOKENS.items():
+            if token in tokens:
+                return (kind, "t:" + token)
+        # Unrecognized class (a future Gmail build change, same risk
+        # _YELLOW_STAR_CLASS_TOKEN's own history already warns about) - degrade to the
+        # old substring-text guess rather than going blind. Still collision-prone for
+        # the same reason as before, but only ever reached for a genuinely unknown
+        # token, not any of the 11 states already confirmed above.
+        for name, words in _STAR_COLOR_KEYWORDS.items():
+            if any(re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", descriptor) for w in words):
+                return (name, "c:" + name)
+        not_starred = any(p in descriptor for p in ("not starred", "niet gesterd", "not_starred", "unstarred")) \
+            and "starred with" not in descriptor and "gesterd met" not in descriptor
+        if not_starred or not descriptor.strip():
+            return ("none", "none")
+        return ("plain", "plain")
 
     def _matches(el):
-        cls = (el.get_attribute("class") or "")
-        if class_token and class_token in cls.split():
-            return True
-        descriptor = " ".join([
-            (el.get_attribute("title") or ""),
-            (el.get_attribute("aria-label") or ""),
-            cls,
-        ]).lower()
-        return any(kw in descriptor for kw in keywords)
+        return _state(el)[0] == color
+
+    def _requery(el_hint_box):
+        """Re-find the star element WITHOUT hovering (unlike _find_star_element) - see
+        the loop below for why repeated hovering is specifically what breaks this."""
+        row_handle = page.evaluate_handle(
+            "(data) => {" + _FIND_ROW_JS + "return findRowById(data.msgId);}", {"msgId": message_id}
+        )
+        row_el = row_handle.as_element()
+        return row_el.query_selector(".T-KT") if row_el else None
 
     try:
         star_el = _find_star_element(page, message_id)
@@ -981,26 +1068,71 @@ def set_star_color(page, message_id, color, max_clicks=12):
         if _matches(star_el):
             return {"success": True, "attempts": 0}
 
+        box = star_el.bounding_box()
+        if not box:
+            return {"success": False, "error": "no_bounding_box"}
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+        # Gmail only cycles through the markers enabled in THIS account's Settings >
+        # General > Stars. An account with just the default star never exposes a
+        # "yellow" label or class token (the default star is drawn yellow but its
+        # aria-label is plain "Starred"), so waiting for an explicit "yellow" burned
+        # all max_clicks and reported a timeout even though the mail WAS starred.
+        # Track the states seen: once a state repeats, a full cycle has completed
+        # without reaching the color - stop clicking instead of looping.
+        seen = [_state(star_el)[1]]
+        cycle_done = False
         for attempt in range(max_clicks):
-            try:
-                star_el.click(timeout=4000)
-            except Exception as e:
-                print(f"[Server] set_star_color: click attempt {attempt + 1} did not land ({e}) - retrying.")
-                page.wait_for_timeout(250)
-                star_el = _find_star_element(page, message_id)
-                if star_el is None:
-                    return {"success": False, "error": "row_not_found_or_star_not_found"}
-                continue
+            # Click the star's FIXED screen position directly (page.mouse.click), NOT
+            # star_el.click() re-resolved via _find_star_element on every iteration.
+            # Reproduced live, with hard evidence, why this matters: _find_star_element
+            # calls row_el.hover() before locating the star - needed once, for the
+            # very first reveal, on accounts where the star only renders on hover - but
+            # doing that AGAIN before every single click was resetting Gmail's own
+            # click-cycle tracking each time, so repeated clicks only ever toggled
+            # between 2 states no matter which color was requested, even though this
+            # account's Settings > General > Stars page confirmed all 12 markers
+            # enabled. A direct diagnostic (12 coordinate clicks, zero re-hovers, same
+            # fixed (x, y) throughout) correctly walked the FULL real cycle in order:
+            # plain -> orange -> red -> purple -> yellow -> green -> red-bang ->
+            # orange-guillemet -> yellow-bang -> green-check -> blue-info ->
+            # purple-question. The element handle itself doesn't need to survive
+            # between clicks (Gmail replaces the node each time regardless) - only the
+            # on-screen position does, and that stays put since nothing else can touch
+            # this page while this synchronous call runs on this thread.
+            page.mouse.click(x, y)
             page.wait_for_timeout(250)
 
-            # Re-query before reading state too - the click just fired may itself
-            # have already replaced this handle's underlying DOM node.
-            star_el = _find_star_element(page, message_id)
+            star_el = _requery(box)
             if star_el is None:
                 return {"success": False, "error": "row_not_found_or_star_not_found"}
 
-            if _matches(star_el):
+            kind, key = _state(star_el)
+            print(f"[Server] set_star_color: attempt {attempt + 1} kind='{kind}' key='{key}' class='{star_el.get_attribute('class') or ''}'")
+            if kind == color:
                 return {"success": True, "attempts": attempt + 1}
+
+            # Default-star-only account: yellow is never labelled, the plain starred
+            # state IS the yellow star. Accept it once a full cycle has shown there's
+            # no explicitly-yellow marker to reach.
+            if color == "yellow" and kind == "plain" and cycle_done:
+                return {"success": True, "attempts": attempt + 1, "note": "default star used as yellow"}
+
+            if key in seen:
+                if not cycle_done:
+                    cycle_done = True
+                    print(f"[Server] set_star_color: full star cycle seen {seen} without '{color}'.")
+                    if color == "yellow" and kind == "plain":
+                        return {"success": True, "attempts": attempt + 1, "note": "default star used as yellow"}
+                    if color == "yellow" and "plain" in seen:
+                        continue  # keep clicking round to the plain star
+                    return {
+                        "success": False,
+                        "error": f"'{color}' star not in this account's cycle (saw {seen}) - enable it in "
+                                 f"Gmail Settings > General > Stars.",
+                    }
+            else:
+                seen.append(key)
 
         # One last, longer-delayed check before giving up. Reproduced live: a run
         # that exhausted all max_clicks attempts and reported failure here still
@@ -1012,7 +1144,7 @@ def set_star_color(page, message_id, color, max_clicks=12):
         # plausible under that load). Cheap to check once more before reporting a
         # false failure - a real "color not enabled" case still fails correctly here.
         page.wait_for_timeout(1500)
-        star_el = _find_star_element(page, message_id)
+        star_el = _requery(box)
         if star_el is not None and _matches(star_el):
             return {"success": True, "attempts": max_clicks}
 
@@ -1933,6 +2065,45 @@ class PlaywrightControlServer(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result).encode("utf-8"))
             return
 
+        if parsed.path == "/debug_star_rapid_click":
+            req = ActionRequest("debug_star_rapid_click", message_id)
+            request_queue.put(req)
+            fulfilled = req.event.wait(timeout=20)
+            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
+        if parsed.path == "/debug_star_hover":
+            req = ActionRequest("debug_star_hover", message_id)
+            request_queue.put(req)
+            fulfilled = req.event.wait(timeout=15)
+            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
+        if parsed.path == "/debug_stars_settings":
+            req = ActionRequest("debug_stars_settings", "")
+            request_queue.put(req)
+            fulfilled = req.event.wait(timeout=45)
+            result = req.result if fulfilled else {"success": False, "error": "timeout"}
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
         if parsed.path == "/star_color":
             color = query.get("color", [""])[0].strip()
             print(f"[Server] Request to star (color='{color}') message id: '{message_id}'")
@@ -2569,6 +2740,129 @@ def main():
                                         };
                                     });
                                 }""")}
+                            elif req.action == "debug_star_rapid_click":
+                                # Temporary diagnostic: get the star's screen position ONCE,
+                                # then click that FIXED coordinate repeatedly with NO
+                                # re-hover and NO re-query between clicks (unlike
+                                # set_star_color's loop, which re-hovers via
+                                # _find_star_element before every single click) - testing
+                                # whether repeated hovering is what's resetting Gmail's own
+                                # cycle-position tracking between clicks.
+                                star_el = _find_star_element(gmail_page_ref, req.message_id)
+                                if star_el is None:
+                                    req.result = {"success": False, "error": "row_not_found_or_star_not_found"}
+                                else:
+                                    box = star_el.bounding_box()
+                                    if not box:
+                                        req.result = {"success": False, "error": "no_bounding_box"}
+                                    else:
+                                        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                                        states = []
+                                        for i in range(12):
+                                            gmail_page_ref.mouse.click(x, y)
+                                            gmail_page_ref.wait_for_timeout(300)
+                                            # Deliberately NOT _find_star_element (which
+                                            # hovers) - plain re-query only, to isolate
+                                            # whether repeated hovering itself is the issue.
+                                            row_handle = gmail_page_ref.evaluate_handle(
+                                                "(data) => {" + _FIND_ROW_JS + "return findRowById(data.msgId);}",
+                                                {"msgId": req.message_id},
+                                            )
+                                            row_el = row_handle.as_element()
+                                            fresh = row_el.query_selector(".T-KT") if row_el else None
+                                            if fresh is None:
+                                                states.append("row_lost")
+                                                break
+                                            cls = fresh.get_attribute("class") or ""
+                                            aria = fresh.get_attribute("aria-label") or ""
+                                            states.append(f"{cls} | {aria}")
+                                        req.result = {"success": True, "states": states}
+                            elif req.action == "debug_star_hover":
+                                # Temporary diagnostic: hover the row's star, wait, then dump
+                                # EVERY element on the page whose class contains "T-KT" (not
+                                # just the one inside this row) - testing whether Gmail reveals
+                                # a flyout/palette of multiple distinct color options on hover
+                                # (classic "superstars" behavior) rather than a single icon that
+                                # cycles through colors on repeated plain clicks. If a flyout
+                                # exists, this should show several T-KT-class elements appearing
+                                # at once near the hovered row that aren't present without hover.
+                                dbg_page = _resolve_action_page(req.message_id) if req.message_id else gmail_page_ref
+                                star_el = _find_star_element(dbg_page, req.message_id)
+                                if star_el is None:
+                                    req.result = {"success": False, "error": "row_not_found_or_star_not_found"}
+                                else:
+                                    dbg_page.wait_for_timeout(600)
+                                    req.result = {"success": True, "elements": dbg_page.evaluate("""() => {
+                                        const els = Array.from(document.querySelectorAll('[class*="T-KT"]'));
+                                        return els.map(el => ({
+                                            className: el.getAttribute('class') || '',
+                                            ariaLabel: el.getAttribute('aria-label') || '',
+                                            dataTooltip: el.getAttribute('data-tooltip') || '',
+                                            visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+                                            rect: (() => { const r = el.getBoundingClientRect(); return {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)}; })(),
+                                        }));
+                                    }""")}
+                            elif req.action == "debug_stars_settings":
+                                # Temporary diagnostic: read Gmail's OWN Settings > General >
+                                # Stars section directly (the "In use" / "Not in use" columns
+                                # the operator configures manually) - the definitive source of
+                                # truth for which markers clicking can currently reach, instead
+                                # of inferring it indirectly from click behavior. Navigates
+                                # gmail_page_ref there and back so it doesn't disrupt the
+                                # periodic scrape loop's expected label view for longer than
+                                # this one request takes.
+                                prior_url = gmail_page_ref.url
+                                try:
+                                    gear = gmail_page_ref.query_selector(
+                                        'div[aria-label="Settings"], div[gh="sn"], '
+                                        '[role="button"][aria-label*="ettings" i], [data-tooltip*="ettings" i]'
+                                    )
+                                    nearby = []
+                                    if gear:
+                                        gear.click(timeout=4000)
+                                        gmail_page_ref.wait_for_timeout(800)
+                                    else:
+                                        # Diagnostic fallback: the gear wasn't found by any of the
+                                        # selectors above - dump every top-right toolbar button's
+                                        # real aria-label/data-tooltip so the correct one can be
+                                        # identified instead of guessing again.
+                                        nearby = gmail_page_ref.evaluate("""() => {
+                                            return Array.from(document.querySelectorAll('[role="button"]'))
+                                                .filter(el => { const r = el.getBoundingClientRect(); return r.top < 70 && r.left > 1300 && r.width > 0; })
+                                                .map(el => ({
+                                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                                    dataTooltip: el.getAttribute('data-tooltip') || '',
+                                                    cls: el.getAttribute('class') || '',
+                                                }));
+                                        }""")
+                                    all_settings = gmail_page_ref.query_selector('text=/See all settings/i')
+                                    if all_settings:
+                                        all_settings.click(timeout=4000)
+                                        gmail_page_ref.wait_for_timeout(1500)
+                                    star_text_el = gmail_page_ref.query_selector("text=/^Stars/")
+                                    if star_text_el:
+                                        star_text_el.scroll_into_view_if_needed()
+                                        gmail_page_ref.wait_for_timeout(500)
+                                    else:
+                                        gmail_page_ref.mouse.move(800, 400)
+                                        gmail_page_ref.mouse.wheel(0, 1400)
+                                        gmail_page_ref.wait_for_timeout(500)
+                                    shot_path = os.path.abspath(os.path.join(
+                                        os.path.dirname(__file__), "..", "data", "debug_stars_settings.png"
+                                    ))
+                                    gmail_page_ref.screenshot(path=shot_path)
+                                    req.result = {
+                                        "success": True, "screenshot_path": shot_path,
+                                        "gear_found": bool(gear), "see_all_found": bool(all_settings),
+                                        "stars_text_found": bool(star_text_el), "nearby_buttons": nearby,
+                                    }
+                                except Exception as e:
+                                    req.result = {"success": False, "error": str(e)}
+                                finally:
+                                    try:
+                                        gmail_page_ref.goto(prior_url)
+                                    except Exception:
+                                        pass
                             elif req.action == "move_starred_to_label":
                                 req.result = move_starred_to_label(gmail_page_ref, req.target_label, req.color)
                             elif req.action == "process_color_starred_forward":

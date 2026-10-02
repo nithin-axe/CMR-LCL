@@ -54,11 +54,15 @@
 - Status: `cancelled_or_deleted`
 
 **No Record Found:**
-- Every container search came back with a genuinely empty results table (not just an org/ETA mismatch) - the shipment isn't in Shypple at all
+- The document's own extracted container number came back with a genuinely empty
+  results table (not just an org/ETA mismatch) - no fallback to the mail's SF number
+  or subject-extracted container is attempted (a real example proved that fallback
+  could point to a completely unrelated shipment whose SF reference just happened to
+  be in the same email)
 - Container numbers are searched with all spaces/dashes stripped (e.g. "MSCU 123456-7" -> "MSCU1234567") before being typed into Shypple's search box
 - **Email gets PURPLE STAR**
 - **Email marked as UNREAD** (needs manual attention)
-- Email moved to `a-cmr-no-record` label
+- No label move - the email stays in its current label
 - Status: `no_match`
 
 ## Key Rules

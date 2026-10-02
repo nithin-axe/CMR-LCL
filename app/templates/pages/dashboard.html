@@ -2760,7 +2760,7 @@
                             <i class="fa-solid fa-triangle-exclamation"></i>
                             <span class="process-banner-text">"${escapeHtml(awaitingNoRecord.subject || awaitingNoRecord.message_id)}" - no record found on Shypple for any
                             extracted container (tried: ${escapeHtml((awaitingNoRecord.tried_containers || []).join(", "))}).
-                            Mark unread + <b>purple star</b> and move to <b>label:${escapeHtml(awaitingNoRecord.no_record_label || "")}</b>?</span>
+                            Mark unread + <b>purple star</b>?</span>
                             <button class="btn" style="width:auto; padding:6px 16px;" onclick="proceedOperations('${f}')">Confirm</button>
                             <button class="btn btn-secondary" style="width:auto; padding:6px 16px;" onclick="skipOperations('${f}')">Skip this email</button>
                         </div>`;

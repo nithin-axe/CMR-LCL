@@ -62,10 +62,6 @@ SHYPPLE_BOOTSTRAP_URL = f"{SHYPPLE_ADMIN_BASE}/admin/shipments/171400"
 GMAIL_CONTROL_SERVER = "http://127.0.0.1:40005"
 FORWARD_NO_ORG_TO = "nl.importsea@shypple.com"
 FORWARD_NO_ORG_LABEL = "a-release-orders"
-# Where a container search comes back with a genuinely EMPTY results table (not just
-# an org/ETA mismatch on real rows) - the shipment isn't in Shypple at all, so the
-# source email gets marked unread and filed here for manual follow-up.
-NO_RECORD_LABEL = "a-cmr-no-record"
 
 # This pipeline must run under "Shypple B.V." (organization_id=1). The admin profile
 # may default to "Shypple Fresh B.V." - ensure_org_is_shypple_bv() switches it once
@@ -1572,6 +1568,37 @@ def _select2_set_native(page, select_id, search_text):
     )
 
 
+def _select2_clear_native(page, select_id):
+    """Deselect every option in a select2-wrapped multi-<select>, writing directly to
+    the native element and firing the same events _select2_set_native uses. Needed
+    before picking OUR OWN container(s) on the document-upload form: Shypple's own
+    "New document" form can arrive with the shipment's real container(s) already
+    pre-selected by default. If the document's own extracted container number then
+    ISN'T found by _select2_pick below (a genuine mismatch - e.g. the document prints
+    a container that isn't this shipment's, or an OCR misread), the pick loop already
+    correctly skips adding it, but without this clear step whatever Shypple had
+    pre-selected stayed checked regardless - silently tagging the uploaded document
+    against container(s) it was never actually confirmed to belong to, instead of
+    leaving the field honestly empty so a human reviewing before submit can see
+    nothing matched."""
+    try:
+        page.evaluate(
+            """(id) => {
+                const sel = document.getElementById(id);
+                if (!sel) return;
+                for (const opt of sel.options) opt.selected = false;
+                if (window.jQuery) {
+                    window.jQuery(sel).val(null).trigger('change');
+                } else {
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }""",
+            select_id,
+        )
+    except Exception as e:
+        log_system(f"_select2_clear_native error for #{select_id}: {e}")
+
+
 _SELECT2_RESULTS_SELECTOR = (
     ".select2-container--open .select2-results__option, .select2-dropdown .select2-results__option"
 )
@@ -1755,6 +1782,13 @@ def fill_shipment_document_form(page, doc_type, file_bytes, file_mime, filename,
 
         picked_containers = []
         if doc_type not in CONTAINER_SKIP_TYPES:
+            # Start from a clean slate - see _select2_clear_native's own docstring for
+            # why: Shypple's form can arrive with container(s) already pre-selected by
+            # default, and without this, a container we fail to find below (e.g. the
+            # document's real container legitimately doesn't match this shipment) left
+            # that pre-selection in place instead of the field honestly ending up
+            # empty, silently tagging the document against the wrong container(s).
+            _select2_clear_native(page, "shipment_document_container_ids")
             for cn in container_numbers or []:
                 if _select2_pick(page, "shipment_document_container_ids", cn):
                     picked_containers.append(cn)
@@ -2203,46 +2237,6 @@ def _record_my_jewellery_flag(job):
             json.dump(entries, f, indent=2)
         os.replace(tmp, _MY_JEWELLERY_TRACKER_PATH)
     log_job(job, "Customer is 'My Jewellery' - recorded and halted (no Shypple automation for this mail).")
-
-
-def _flag_no_record_source_email(job):
-    """Ask the Gmail automation to mark this job's source email unread and move it to
-    NO_RECORD_LABEL - fires when every container search came back with a genuinely
-    empty results table (the shipment isn't in Shypple at all, not just an org/ETA
-    mismatch on real rows). Per the operator's explicit rule, the caller also gives
-    the email a purple star right after this call (same star used for the
-    cancelled/deleted-shipment outcome) - not done in here, since _star_source_email
-    is a separate, already-shared helper the caller (process_one_job) also uses for
-    its other outcomes. Records job["no_record_status"] ("flagged"/"failed")."""
-    message_id = job.get("message_id") or ""
-    if not message_id.startswith("pw_"):
-        log_job(job, "Skipped unread/relabel: this email isn't from the delegated mailbox the "
-                     "Gmail automation can act on.")
-        with STATE_LOCK:
-            job["no_record_status"] = "failed"
-            job["no_record_error"] = "Not a delegated-mailbox email."
-        return
-    raw_id = message_id[len("pw_"):]
-    try:
-        params = urllib.parse.urlencode({"id": raw_id, "label": NO_RECORD_LABEL})
-        url = f"{GMAIL_CONTROL_SERVER}/mark_unread_and_move_to_label?{params}"
-        with urllib.request.urlopen(url, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        if result.get("success"):
-            log_job(job, f"No record found on Shypple for any extracted container - marked unread and "
-                          f"moved to label:{NO_RECORD_LABEL}.")
-            with STATE_LOCK:
-                job["no_record_status"] = "flagged"
-        else:
-            log_job(job, f"Could not flag as no-record: {result.get('error')}")
-            with STATE_LOCK:
-                job["no_record_status"] = "failed"
-                job["no_record_error"] = result.get("error")
-    except Exception as e:
-        log_job(job, f"Could not reach the Gmail automation to flag this email: {e}")
-        with STATE_LOCK:
-            job["no_record_status"] = "failed"
-            job["no_record_error"] = str(e)
 
 
 def _forward_and_relabel_source_email(job):
@@ -3083,12 +3077,19 @@ def process_lcl_arrival_job(page, job):
 
 def process_one_job(page, job):
     containers = job.get("containers") or []
-    # Tracks whether `containers` already came FROM Shypple's own Containers tab (via
-    # the SF-number route right below, or the retry further down after a genuinely
-    # empty search) rather than from the email/document's own extracted text - once
-    # that's happened, retrying via SF number again on a second empty result would
-    # just repeat the exact same lookup pointlessly.
-    sf_fallback_used = False
+    # Captured ONCE, before either SF-number fallback below can reassign `containers`
+    # to the shipment's own (possibly multi-container) list - `containers` from here
+    # on is purely "what do we search Shypple with to find the right shipment", which
+    # a fallback is free to replace. This variable stays the DOCUMENT's own container(s)
+    # as extracted, used later for which container the upload/verification actually
+    # tags the document against. Conflating the two previously meant: a document whose
+    # own printed container (e.g. "MOAU1439260") has no direct Shypple record -> SF
+    # number finds the real shipment -> that shipment's OWN unrelated containers (e.g.
+    # two other containers on the same multi-container shipment) silently replaced the
+    # document's real container everywhere downstream, including which container(s)
+    # got ticked on the actual document upload form - tagging the document against
+    # containers it has nothing to do with, not the one it was actually printed for.
+    extracted_containers = list(containers)
     if not containers:
         # No container number could be extracted from the email/document at all - very
         # plausible for a CMR that's a scanned, HANDWRITTEN form (hard for OCR/the LLM
@@ -3128,7 +3129,6 @@ def process_one_job(page, job):
             return
 
         containers = found_containers
-        sf_fallback_used = True
         with STATE_LOCK:
             job["containers"] = containers
         log_job(job, f"Read container number(s) from Shypple's Containers tab via SF number '{sf_number}': {containers}.")
@@ -3172,56 +3172,22 @@ def process_one_job(page, job):
 
     match, tried, diagnostics, any_candidates_seen, cancelled_or_deleted_seen = _search_containers(containers)
 
-    # A genuinely empty results table (not an org/ETA mismatch, not cancelled/deleted)
-    # for EVERY extracted container is exactly as consistent with "the extraction is
-    # wrong" as it is with "no record exists" - a scanned/handwritten CMR can have its
-    # container number misread (e.g. real-world case: "MSBU7509380" printed on the
-    # document and in the subject line, extracted as "MCBU7509380" - a one-character
-    # OCR/LLM misread that searches for a container that was never going to exist).
-    # Per the same "Shypple's own Containers tab is the authoritative source, not a
-    # re-parse of the email/PDF text" principle the empty-containers branch above
-    # already applies, retry via the mail's SF number (if we haven't already gone
-    # through that route to GET here) before concluding there's no record at all -
-    # this mirrors LCL's Delivery Order upload using Shypple's Containers tab instead
-    # of trusting the regex-extracted container number.
-    if not match and not cancelled_or_deleted_seen and not any_candidates_seen and not sf_fallback_used:
-        sf_number = job.get("sf_number")
-        if sf_number:
-            set_job_status(job, "processing", phase=f"No match for extracted container(s) - trying SF number {sf_number}")
-            log_job(job, f"No Shypple record for extracted container(s) ({', '.join(tried)}) - this can mean the "
-                         f"extraction misread the container (common for a scanned/handwritten CMR), not that "
-                         f"there's genuinely no record - trying SF number '{sf_number}' instead.")
-            found = find_shipment_by_sf_number(page, sf_number)
-            if found.get("success"):
-                page.goto(SHYPPLE_ADMIN_BASE + found["shipment_path"])
-                page.wait_for_timeout(1000)
-                open_containers_tab(page)
-                labels = page.eval_on_selector_all(".containers-list a", "els => els.map(e => e.textContent.trim())")
-                found_containers = sorted(set(filter(None, (extract_container_from_label(l) for l in labels))))
-                if found_containers:
-                    log_job(job, f"Found shipment via SF number '{sf_number}' - re-searching with its real "
-                                 f"container(s) read off the Containers tab: {found_containers}.")
-                    # Reassign the LOCAL `containers` too, not just job["containers"] - every
-                    # caller downstream of this function (_verify_and_upload_documents's
-                    # email-vs-shipment container comparison, the document upload's container
-                    # picker) reads the local variable, not the job dict. Leaving it as the
-                    # original wrong extraction here previously meant the shipment matched
-                    # correctly but the upload step still tried to pick the WRONG (email-
-                    # extracted) container on the form and reported it "not found" - the real
-                    # bug this whole fallback exists to route around, just moved one step later.
-                    containers = found_containers
-                    with STATE_LOCK:
-                        job["containers"] = containers
-                    sf_match, sf_tried, sf_diagnostics, sf_any_candidates_seen, sf_cancelled_or_deleted_seen = _search_containers(found_containers)
-                    tried = tried + sf_tried
-                    diagnostics = diagnostics + sf_diagnostics
-                    match, any_candidates_seen, cancelled_or_deleted_seen = sf_match, sf_any_candidates_seen, sf_cancelled_or_deleted_seen
-                else:
-                    log_job(job, f"Shipment found via SF number '{sf_number}' but its Containers tab is empty - "
-                                 "nothing to re-search with.")
-            else:
-                log_job(job, f"SF number '{sf_number}' lookup also failed: {found.get('error')}")
-
+    # Per the operator's explicit rule: when the DOCUMENT's own extracted container
+    # number comes back with a genuinely empty results table, that's treated as a real
+    # "no record" outcome - go straight to the no-record/purple-star flow below, do NOT
+    # fall back to the mail's SF number (or any subject-extracted container) to go find
+    # a DIFFERENT shipment. A previous version of this function retried via SF number
+    # here, reasoning a misread was as likely as a genuine no-record case - but a real
+    # example proved that reasoning wrong: the document's container was read correctly
+    # (confirmed against the actual CMR image), yet the SF number in the subject
+    # pointed to a completely unrelated shipment (different sender, different cargo) -
+    # the email's subject/SF-reference simply didn't match its own attached document.
+    # Falling back there would have offered to upload this document against a shipment
+    # it has nothing to do with. See the empty-containers branch above (no container
+    # extracted from the email AT ALL) for the one case that still legitimately uses
+    # the SF number - that's a different situation (nothing to search with in the
+    # first place), not this one (something was extracted and searched, and genuinely
+    # isn't there).
     if not match:
         reason = "; ".join(diagnostics) if diagnostics else "no search results at all"
         if cancelled_or_deleted_seen:
@@ -3242,17 +3208,21 @@ def process_one_job(page, job):
                 job, "awaiting_no_record_confirmation",
                 phase="Waiting for confirmation - no record found on Shypple",
                 tried_containers=tried, reason=reason,
-                no_record_label=NO_RECORD_LABEL,
             )
             log_job(job, "Every container search came back with a genuinely empty results table "
                           "(not just an org/ETA mismatch). Waiting for confirmation before marking "
-                          f"unread + purple star and moving to label:{NO_RECORD_LABEL}.")
+                          "unread + purple star.")
             if not _wait_for_confirmation(job):
                 set_job_status(job, "skipped_by_operator", phase="Skipped by operator")
-                log_job(job, "Skipped by operator - left as-is, no label change.")
+                log_job(job, "Skipped by operator - left as-is.")
                 return
-            set_job_status(job, "processing", phase="Marking unread and moving label...")
-            _flag_no_record_source_email(job)
+            set_job_status(job, "processing", phase="Marking unread...")
+            # Per the operator's explicit rule: no label move for this outcome - just
+            # unread + purple star, same mechanism every other outcome in this file
+            # uses (no separate "flag and relabel" endpoint, which was also a real
+            # source of failure on its own - Gmail's Labels button isn't always
+            # findable the way this needed it to be).
+            _mark_source_email_unread(job)
             # Final status set before the star, same reasoning as the cancelled/deleted
             # branch above - _star_source_email's row-list retry can take up to ~70s in
             # the worst case, and the dashboard should show this job as done right away
@@ -3348,13 +3318,24 @@ def process_one_job(page, job):
         log_job(job, f"Matched shipment under '{FRESH_ORG_NAME}' - organization: "
                       f"{match.get('org') or '(still none)'}, ETA: {match.get('eta') or 'n/a'}.")
 
+    # Use the DOCUMENT's own extracted container(s) for verification/upload-tagging,
+    # not whatever `containers` ended up holding after a possible SF-number fallback
+    # (that fallback exists purely to locate the right SHIPMENT, via a machine-printed
+    # SF reference, when the document's own container had no direct match - the
+    # shipment's other containers it reads off the Containers tab in that process are
+    # not necessarily what THIS document is actually for). Only when nothing was ever
+    # extracted from the document/email in the first place (extracted_containers is
+    # empty - the mail never had a container number to begin with) is there nothing
+    # document-specific to fall back to, so the shipment-derived list is used instead.
+    verify_containers = extracted_containers if extracted_containers else containers
+
     # try/finally, not a plain sequential call: an unhandled exception out of
     # _verify_and_upload_documents (e.g. a Playwright timeout mid-upload) must still
     # switch the org back before propagating - otherwise the NEXT job in this batch
     # would silently inherit this job's Fresh B.V. detour instead of a bug here just
     # failing this one job, which is far worse (documents attached to the wrong org).
     try:
-        _verify_and_upload_documents(page, job, match, containers)
+        _verify_and_upload_documents(page, job, match, verify_containers)
     finally:
         if job.get("organization_switched_to"):
             try:
