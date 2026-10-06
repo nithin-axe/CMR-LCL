@@ -373,6 +373,7 @@ def lcl_arrivals_process():
     from app.services.parsing.document_classifier import (
         classify_lcl_arrival_email, extract_sf_number, extract_lcl_arrival_data,
         extract_lcl_fields_via_llm, _extract_pdf_page_texts, find_all_document_sources,
+        normalize_cfs_address,
     )
     from app.services.llm.llm_client import GeminiClient
 
@@ -653,6 +654,9 @@ def lcl_arrivals_process():
                 if not sf_number and llm_fields.get("sf_number"):
                     sf_number = llm_fields["sf_number"]
                     res_entry["sf_number"] = sf_number
+
+            if extracted.get("cfs_address"):
+                extracted["cfs_address"] = normalize_cfs_address(extracted["cfs_address"])
 
         res_entry["flow"] = "lcl_arrivals"
         res_entry["extracted"] = extracted

@@ -1168,9 +1168,10 @@ def edit_preceding_customs_and_cfs(page, customs_number, cfs_address):
         # was reported back as a success ("matched": true).
         #
         # Fixed by: (1) keeping the one CONFIRMED, operator-verified collision
-        # (raw text "CTG" alone always means CTG Logistics on the real dropdown,
-        # never CTG Export) as an explicit rule checked first; (2) for
-        # everything else, matching against the FULL extracted text at
+        # (any extracted text containing "CTG" - whether the bare word or a full
+        # free-text name like "CTG Cargo Terminal Gadering BV" - always means CTG
+        # Logistics on the real dropdown, never CTG Export) as an explicit rule
+        # checked first; (2) for everything else, matching against the FULL extracted text at
         # decreasing prefix lengths (longest first) and only accepting a
         # length once it resolves to EXACTLY ONE option - so "CTG Logistics"
         # (13 chars) matches its one option directly, long before the search
@@ -1193,7 +1194,7 @@ def edit_preceding_customs_and_cfs(page, customs_number, cfs_address):
                 return {cfs_matched: true, cfs_selected_text: (opt.textContent || '').trim()};
             };
 
-            if (target === 'CTG') {
+            if (target.includes('CTG')) {
                 const ctgLogistics = options.find(o => norm(o.textContent).includes('CTG LOGISTICS'));
                 if (ctgLogistics) return finalize(ctgLogistics);
             }
@@ -2535,12 +2536,16 @@ def _values_match_cfs(extracted, current):
     prefix of `extracted` first (most specific - least likely to collide with an
     unrelated option) and only falling back to shorter prefixes, down to a 3-char
     floor, if the full text doesn't match - mirroring the longest-prefix-wins
-    logic edit_preceding_customs_and_cfs itself uses to SELECT the option."""
+    logic edit_preceding_customs_and_cfs itself uses to SELECT the option. Any
+    extracted text containing "CTG" (bare word or a full free-text name like "CTG
+    Cargo Terminal Gadering BV") is treated the same confirmed way: it always means
+    CTG Logistics, never CTG Export - mirroring edit_preceding_customs_and_cfs's own
+    widened rule."""
     if not extracted or not current:
         return False
     norm = lambda s: re.sub(r"\s+", " ", s).strip().upper()
     extracted_n, current_n = norm(extracted), norm(current)
-    if extracted_n == "CTG":
+    if "CTG" in extracted_n:
         return "ctg logistics" in current.lower()
     for length in range(len(extracted_n), 2, -1):
         if current_n.startswith(extracted_n[:length]):

@@ -1927,6 +1927,21 @@ def extract_lcl_arrival_data(text, strict=False):
     }
 
 
+def normalize_cfs_address(value):
+    """Real Arrival Notice documents print the Discharge CFS as a full free-text
+    company name/address starting with "CTG" (e.g. "CTG CARGO TERMINAL GADERING
+    BV"), never Shypple's own dropdown option text ("CTG Logistics B.V."). Collapse
+    any such value down to the exact name the operator/Shypple side both recognize,
+    so the Operations Process review panel shows it correctly and
+    edit_preceding_customs_and_cfs's option-matching finds an unambiguous prefix
+    match instead of failing on the "CTG Export" vs "CTG Logistics B.V." ambiguity."""
+    if not value:
+        return value
+    if "CTG" in value.strip().upper():
+        return "CTG Logistics"
+    return value
+
+
 _INVALID_CUSTOMS_WORDS_RE = re.compile(
     r"\b(?:"
     r"vessel|voyage|vsl|vyg|voy|ship|feeder|flag|imo|mmsi"
@@ -2074,6 +2089,7 @@ def extract_lcl_fields_from_bytes(data_bytes, mime, filename="", strict=False):
             regex_val = extracted.get(k)
             if not regex_val or str(regex_val).strip().casefold() != str(llm_val).strip().casefold():
                 extracted[k] = llm_val
+    extracted["cfs_address"] = normalize_cfs_address(extracted.get("cfs_address"))
     return extracted
 
 
