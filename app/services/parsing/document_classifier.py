@@ -1102,14 +1102,70 @@ def resolve_deep_classification(message_id, subject="", force=False, label=None)
     return classify_documents(message_id, subject, payload.get("body", ""), attachments, force=force)
 
 
-def classify_documents_cmr(message_id, subject, body_html, attachments, force=False):
-    """CMR-label override of classify_documents. Every mail in label:a-cmr carries a
-    CMR document as its primary attachment - but we should classify ALL attachments properly.
+def _confirm_cmr_document_via_llm(gemini, data_bytes, mime, filename):
+    """Judge ONLY from an attachment's own visual content whether it is a real CMR
+    consignment note - deliberately given NO email subject/body context at all.
 
-      - First, identify which attachment is the CMR document using filename hints and content analysis.
-      - For the CMR attachment, classify as "Cmr".
-      - For all other attachments, use the regular classifier to determine their actual type
-        (not just mark them as "Other").
+    Root cause of a real bug: classify_documents_cmr's step 3 used to call the
+    general-purpose _classify_attachment (the same one every other document type
+    uses) as its content-based fallback. That function is intentionally built to
+    fall back to the email subject when the document itself has no clear label -
+    correct for its normal job, but every single mail in the a-cmr label has "CMR"
+    somewhere in its subject (that's why it's in this label), so it kept inferring
+    "Cmr" from the SUBJECT LINE even for a plain photo of a container that has no
+    CMR markings on it anywhere - reproducing the exact same bug through the LLM
+    instead of the old blind default. Fixed by never giving this check the subject/
+    body at all - it can only answer from what's actually printed/visible on the
+    page itself."""
+    if not data_bytes or not (mime or "").startswith(_LLM_READABLE_PREFIXES) or len(data_bytes) > 18 * 1024 * 1024:
+        return False
+    prompt = (
+        "You are shown ONE attachment, with no other context. Decide whether it is an "
+        "actual CMR consignment note (a standardized international road transport "
+        "waybill - titles like \"CMR\", \"Lettre de voiture\", \"Vrachtbrief\", or "
+        "\"Frachtbrief\", normally laid out as numbered boxes 1-24 for sender, "
+        "consignee, carrier, vehicle, goods, signatures, etc. - it can be printed, "
+        "handwritten, typed, or a photo of the physical paper form).\n\n"
+        "It is NOT a CMR document if it is, for example: a plain photo of a shipping "
+        "container, truck, warehouse, or goods (even if a container/truck appears in "
+        "a CMR form's own photo evidence, a bare photo with no CMR form content is "
+        "not one); a Delivery Order; an invoice; a packing list; a status update; or "
+        "any other document type.\n\n"
+        "Judge ONLY from what is actually printed, stamped, or handwritten on this "
+        "specific attachment - do NOT guess from a filename or assume it must be a "
+        "CMR just because it was sent in a CMR-related email.\n\n"
+        "Respond with ONLY a JSON object, no markdown fences:\n"
+        '{"is_cmr": true/false, "reason": "..."}'
+    )
+    try:
+        parsed = _parse_llm_json(gemini.generate_multimodal(prompt, [(mime, data_bytes)]))
+        if parsed:
+            return bool(parsed.get("is_cmr"))
+    except Exception as e:
+        _log_warn(f"CMR content confirmation LLM call failed for '{filename}': {e}")
+    return False
+
+
+def classify_documents_cmr(message_id, subject, body_html, attachments, force=False):
+    """CMR-label override of classify_documents - most mail in label:a-cmr carries a
+    real CMR consignment note as one of its attachments, but NOT always (confirmed by
+    two real examples that both got mislabeled: a plain photo of a container on a
+    truck with no other attachment, and a ONE "DELIVERY ORDER" PDF with no other
+    attachment - neither is a CMR document, yet both used to get tagged "Cmr").
+
+      - First, identify which attachment is the CMR document using filename hints,
+        then PDF text content, then - only if neither resolves it - a dedicated,
+        context-blind multimodal check (_confirm_cmr_document_via_llm) run just on
+        the attachment(s) still unresolved. That check is deliberately given NO
+        subject/body text, because every mail in this label has "CMR" somewhere in
+        its subject by definition - letting it see the subject would just reproduce
+        the same mislabeling through the LLM instead of fixing it.
+      - Only ever tag an attachment "Cmr" once one of those three steps POSITIVELY
+        confirms it - never guess/default. If nothing resolves to "Cmr", nothing is
+        tagged "Cmr"; a mail can legitimately have none.
+      - Every other attachment is tagged "Other" (a mail with several attachments -
+        e.g. a long forwarded thread - uploads its one real CMR document as "Cmr" and
+        everything else as "Other", never multiple "Cmr"s).
       - Excel/body-only entries fall through to the base classifier unchanged.
       - All confirmation gates (awaiting_upload_confirmation, awaiting_submit_
         confirmation, etc.) are unaffected - this only decides the TYPE label, nothing
@@ -1118,17 +1174,10 @@ def classify_documents_cmr(message_id, subject, body_html, attachments, force=Fa
     Implemented as a thin wrapper: builds the attachments list with pre-assigned types
     and calls classify_documents with those overrides baked in, so caching, container
     extraction, and every downstream consumer work exactly as before."""
-    # 1. Check filename hints first to identify CMR document
+    gemini = GeminiClient()
+
+    # 1. Check filename hints first to identify the CMR document.
     cmr_index = None
-    # Populated in step 2 below (PDF text content) with attachments positively
-    # identified as NOT the CMR document (e.g. a Status Update). Declared here, not
-    # scoped inside step 2's "if cmr_index is None" block, so the final "fallback to
-    # index 0" further down can also respect it - it previously couldn't see this set
-    # at all and would force-label a confirmed-non-CMR attachment (like a Status
-    # Update PDF) as "Cmr" simply for being the only/first non-Excel attachment, which
-    # is exactly what caused a Status Update document to show up tagged "Cmr" in the
-    # Operations review panel.
-    other_indices = set()
     for i, att in enumerate(attachments or []):
         if _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
             continue
@@ -1136,7 +1185,10 @@ def classify_documents_cmr(message_id, subject, body_html, attachments, force=Fa
             cmr_index = i
             break
 
-    # 2. Check PDF text content to accurately identify CMR vs Status Update / Other
+    # 2. Check PDF text content - only a POSITIVE "this page says CMR/vrachtbrief/
+    # consignment note" match counts; not matching proves nothing (a scanned/
+    # handwritten CMR has no text layer at all), so unlike before, failing to match
+    # here no longer marks the attachment as excluded from being the CMR one.
     if cmr_index is None:
         for i, att in enumerate(attachments or []):
             if _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
@@ -1147,30 +1199,41 @@ def classify_documents_cmr(message_id, subject, body_html, attachments, force=Fa
                 text = " ".join(page_texts).lower()
                 is_status_update = bool(re.search(r"status\s*update|mededeling|vooraanmelding|pakket|packing\s*list|invoice|factura", text))
                 is_cmr_text = bool(re.search(r"\bcmr\b|vrachtbrief|consignment\s*note|lettre\s*de\s*voiture|internationaler\s*frachtbrief", text))
-                if is_status_update:
-                    other_indices.add(i)
-                if is_cmr_text and not is_status_update and cmr_index is None:
-                    cmr_index = i
-
-        # 3. Default to the first non-Excel attachment that is NOT a Status Update / Other
-        if cmr_index is None:
-            for i, att in enumerate(attachments or []):
-                if not _is_excel_attachment(att.get("filename", ""), att.get("mime", "")) and i not in other_indices:
+                if is_cmr_text and not is_status_update:
                     cmr_index = i
                     break
 
-    # Fallback to the first non-Excel attachment NOT already confirmed as a Status
-    # Update/Other by step 2, in case step 3 above never ran (cmr_index was still None
-    # after the filename-hint pass but step 2's text scan found no PDF to read - e.g.
-    # no data_bytes yet). Still respects other_indices so this can't undo step 2's
-    # positive "this one is NOT the CMR document" finding.
+    # 3. Last resort: ask a DEDICATED, context-blind check (_confirm_cmr_document_via_
+    # llm - deliberately given no subject/body at all) whether the attachment's own
+    # content is really a CMR form - covers both the case a PDF's text layer doesn't
+    # literally contain a CMR keyword and the case the attachment is an image (a
+    # photographed/scanned CMR form, or - as confirmed - a photo of something else
+    # entirely, like the container itself).
+    #
+    # Deliberately NOT _classify_attachment (the general classifier every other
+    # document type uses) here: that function intentionally falls back to the EMAIL
+    # SUBJECT when the document itself has no clear label - correct for its normal
+    # job, but every mail in the a-cmr label has "CMR" somewhere in its subject
+    # (that's why it's in this label), so it kept inferring "Cmr" from the subject
+    # line for a plain container photo that has no CMR markings on it anywhere -
+    # reproducing the exact same bug one layer deeper, through the LLM instead of a
+    # blind default. Only a positive, content-only confirmation is accepted; anything
+    # else is left alone and surfaces as "Other" below, never forced to "Cmr" just
+    # for being the only attachment left.
     if cmr_index is None:
         for i, att in enumerate(attachments or []):
-            if not _is_excel_attachment(att.get("filename", ""), att.get("mime", "")) and i not in other_indices:
+            if _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
+                continue
+            filename = att.get("filename", "") or ""
+            mime = att.get("mime") or _guess_mime(filename)
+            if _confirm_cmr_document_via_llm(gemini, att.get("data_bytes"), mime, filename):
                 cmr_index = i
                 break
 
-    # For CMR attachments, we override to "Cmr", for others we let the regular classifier determine the type
+    # For the confirmed CMR attachment, override to "Cmr"; every other attachment is
+    # tagged "Other" - a confirmed non-CMR attachment in a CMR-labelled mail (a
+    # Delivery Order, a status update, a container photo, ...) is still uploaded,
+    # just not as "Cmr".
     overridden = []
     for i, att in enumerate(attachments or []):
         if _is_excel_attachment(att.get("filename", ""), att.get("mime", "")):
