@@ -3193,6 +3193,75 @@ def process_one_job(page, job):
     # the SF number - that's a different situation (nothing to search with in the
     # first place), not this one (something was extracted and searched, and genuinely
     # isn't there).
+    #
+    # The ONE narrow exception to that rule is immediately below: the document's own
+    # read was ALREADY self-flagged uncertain at extraction time (not just "it didn't
+    # match" after the fact - see _extract_containers_via_llm, e.g. an ambiguous
+    # handwritten digit). Only when that flag is set, AND the search above came back
+    # with a genuinely empty results table (not an org/ETA mismatch or a cancelled/
+    # deleted shipment - those mean a real record for that exact container WAS found,
+    # so a misread isn't the explanation), is a misread plausible enough to retry with
+    # a more reliable source before accepting "no record": first the SF number (same mechanism as the
+    # no-container-at-all branch above - look up the shipment and read its REAL
+    # container(s) off its own Containers tab), then a container number mentioned
+    # directly in the mail's own subject/body text. This does NOT reopen the "no
+    # fallback on no-record" rule above for a HIGH-confidence read - that real bug
+    # was a correctly-read container whose SF number pointed to a totally unrelated
+    # shipment (different sender, different cargo); here the ORIGINAL read itself is
+    # already suspect, so a shipment this close by (same SF reference on the same
+    # document, or its own subject's own printed container) is far more likely to be
+    # the SAME shipment, not an unrelated one.
+    if not match and not cancelled_or_deleted_seen and not any_candidates_seen and job.get("containers_low_confidence"):
+        retry_containers, retry_source = None, None
+        sf_number = job.get("sf_number")
+        conf_score = job.get("containers_confidence_score")
+        conf_desc = f"{round(conf_score)}% confidence" if isinstance(conf_score, (int, float)) else "low confidence"
+        if sf_number:
+            log_job(job, f"Container read ({', '.join(tried)}) scored {conf_desc} (threshold: >80%) and had no "
+                         f"record on Shypple - trying SF number '{sf_number}' instead before giving up.")
+            found = find_shipment_by_sf_number(page, sf_number)
+            if found.get("success"):
+                page.goto(SHYPPLE_ADMIN_BASE + found["shipment_path"])
+                page.wait_for_timeout(1000)
+                open_containers_tab(page)
+                labels = page.eval_on_selector_all(".containers-list a", "els => els.map(e => e.textContent.trim())")
+                sf_containers = sorted(set(filter(None, (extract_container_from_label(l) for l in labels))))
+                if sf_containers:
+                    retry_containers, retry_source = sf_containers, f"SF number '{sf_number}'"
+                else:
+                    log_job(job, f"Shipment for SF number '{sf_number}' has no containers listed on its Containers tab.")
+            else:
+                log_job(job, f"Could not find a shipment for SF number '{sf_number}': {found.get('error')}")
+
+        if not retry_containers:
+            body_containers = [c for c in (job.get("body_containers") or []) if re.sub(r"[\s\-]", "", c).upper() not in tried]
+            if body_containers:
+                log_job(job, f"No SF number (or SF lookup failed) - trying container number(s) found in "
+                             f"the mail's own subject/body instead: {body_containers}.")
+                retry_containers, retry_source = body_containers, "the mail's own subject/body"
+
+        if retry_containers:
+            r_match, r_tried, r_diagnostics, r_any_candidates, r_cancelled = _search_containers(retry_containers)
+            tried = tried + r_tried
+            diagnostics = diagnostics + r_diagnostics
+            if r_match or r_any_candidates or r_cancelled:
+                log_job(job, f"Found a record via {retry_source} that the low-confidence document read missed - "
+                             f"using it instead.")
+                match, any_candidates_seen, cancelled_or_deleted_seen = r_match, r_any_candidates, r_cancelled
+                if r_match:
+                    # A real match via a more reliable source than the document's own
+                    # shaky read - trust it for upload-tagging too, not just for
+                    # locating the shipment (unlike the no-container-at-all branch's
+                    # Containers-tab read, this is specifically CORRECTING a document
+                    # reading we already have independent reason to distrust, not
+                    # substituting an unrelated shipment's own container list).
+                    containers = retry_containers
+                    extracted_containers = retry_containers
+                    with STATE_LOCK:
+                        job["containers"] = containers
+            else:
+                log_job(job, f"{retry_source} also had no record - proceeding with the original no-record outcome.")
+
     if not match:
         reason = "; ".join(diagnostics) if diagnostics else "no search results at all"
         if cancelled_or_deleted_seen:

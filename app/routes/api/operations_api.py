@@ -300,6 +300,20 @@ def extract_operations():
                 "message_id": mid,
                 "subject": subject or mid,
                 "containers": rec.get("containers") or [],
+                # Set when the document's own container read came back self-flagged as
+                # uncertain (e.g. ambiguous handwritten digits - see
+                # _extract_containers_via_llm). process_one_job uses this to prefer the
+                # SF number / the mail's own subject-printed container over a shaky
+                # document read, instead of trusting it outright.
+                "containers_low_confidence": bool(rec.get("containers_low_confidence")),
+                # The raw 0-100 self-rated score behind the flag above, for the review
+                # panel to display (e.g. "62% confidence") - None when no LLM read was
+                # ever needed (deterministic regex found the container(s) directly).
+                "containers_confidence_score": rec.get("containers_confidence_score"),
+                # A container number mentioned directly in the mail's own subject/body
+                # text (regardless of what the attachment itself contains) - the second
+                # fallback source, after the SF number, for a low-confidence document read.
+                "body_containers": rec.get("body_containers") or [],
                 # Fallback for process_one_job when containers comes back empty (e.g. a
                 # scanned, HANDWRITTEN CMR that's genuinely too hard to OCR/LLM-read
                 # reliably) - a machine-printed SF reference in the subject line, so the

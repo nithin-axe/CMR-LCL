@@ -1315,13 +1315,34 @@ def classify_documents_lcl(message_id, subject, body_html, attachments, force=Fa
     )
 
 
+# Per the operator's explicit rule: a document-extracted container number is only
+# trusted to search Shypple with directly when the LLM's own self-rated confidence is
+# STRICTLY GREATER than this (so a score of exactly 80 still counts as low-confidence,
+# matching "greater than 80" literally). See _extract_containers_via_llm and its
+# callers' containers_low_confidence handling in shypple_process.py.
+_CONTAINER_CONFIDENCE_THRESHOLD = 80
+
+
 def _extract_containers_via_llm(gemini, data_bytes, mime, filename):
     """Read ISO-6346 container number(s) directly off a document's actual bytes via
     Gemini multimodal. Handles printed OR handwritten container numbers in any format
     (boxes 1-24, stamps, messy handwriting, spaced/dashed format). Best-effort only;
-    returns [] on any failure or on a non-multimodal-readable file, never raises."""
+    returns ([], None) on any failure or on a non-multimodal-readable file, never
+    raises.
+
+    Returns (containers, confidence_score). confidence_score is the LOWEST of the
+    model's own 0-100 self-rated confidence across every container number it
+    reported (lowest, not an average, so one shaky digit in an otherwise-clear read
+    still drags the overall score down rather than being diluted away), or None if
+    nothing was found. Compare against _CONTAINER_CONFIDENCE_THRESHOLD, not some
+    ad-hoc cutoff, so the two stay in sync. A real example proved this matters: a
+    handwritten "HAMU...5542..." was read as HAMU4555426, but the actual container
+    was HAMU4595426 - a single ambiguous digit, confidently but wrongly resolved one
+    way. Callers use a below-threshold score to prefer a more reliable source (the
+    mail's SF number or its own subject/body-printed container) over a shaky read,
+    instead of searching Shypple with it as if it were certain."""
     if not data_bytes or not (mime or "").startswith(_LLM_READABLE_PREFIXES) or len(data_bytes) > 18 * 1024 * 1024:
-        return []
+        return [], None
     prompt = (
         "This is a freight/logistics document (e.g. a CMR consignment note, bill of lading, or arrival document). "
         "Examine the document carefully - including any printed text, handwritten notes, hand-filled form boxes "
@@ -1329,16 +1350,31 @@ def _extract_containers_via_llm(gemini, data_bytes, mime, filename):
         "Extract ALL ISO-6346 container numbers printed OR handwritten on it (4 letters followed by 6 or 7 digits, "
         "e.g. TEMU9681744, TEMU 968174-4, CAIU7160568, MSCU1234567). Handwritten letters or numbers can be messy, "
         "slanted, or spaced out - read them thoroughly. "
+        "For EACH container number, also honestly self-rate your confidence as a 0-100 integer: 100 means every "
+        "single character is perfectly clear and unambiguous; score it LOWER the more a character could plausibly "
+        "be misread as something else (messy handwriting, smudged, cramped spacing, a digit that could be a "
+        "different digit) - do not default to a high score just because you were able to produce an answer; "
+        "honestly reflect how likely each character is to be wrong. "
         "Respond with ONLY a JSON object, no markdown fences:\n"
-        '{"containers": ["..."]}'
+        '{"containers": [{"number": "...", "confidence": 0-100}]}'
     )
     try:
         parsed = _parse_llm_json(gemini.generate_multimodal(prompt, [(mime, data_bytes)]))
         if parsed:
-            return _merge_containers(parsed.get("containers"))
+            raw = parsed.get("containers") or []
+            # Tolerate the model replying with a plain string list too (no confidence
+            # given at all) - treated as the lowest possible score, never silently
+            # trusted just because a number came back.
+            numbers = [c.get("number") if isinstance(c, dict) else c for c in raw]
+            scores = [
+                _safe_float(c.get("confidence")) if isinstance(c, dict) and c.get("confidence") is not None else 0.0
+                for c in raw
+            ]
+            confidence_score = min(scores) if scores else None
+            return _merge_containers(numbers), confidence_score
     except Exception as e:
         _log_warn(f"Container-only LLM read failed for '{filename}': {e}")
-    return []
+    return [], None
 
 
 def _backfill_missing_cmr_containers(message_id, record):
@@ -1371,14 +1407,15 @@ def _backfill_missing_cmr_containers(message_id, record):
         if not data_bytes:
             return record
         gemini = GeminiClient()
-        containers = _extract_containers_via_llm(
+        containers, confidence_score = _extract_containers_via_llm(
             gemini, data_bytes,
             cached_mime or "", cached_filename or cmr_doc.get("filename", ""),
         )
     except Exception as e:
         _log_warn(f"Container backfill failed for {message_id}: {e}")
-        containers = []
+        containers, confidence_score = [], None
 
+    low_confidence = confidence_score is not None and confidence_score <= _CONTAINER_CONFIDENCE_THRESHOLD
     with _CACHE_LOCK:
         cache = _load_cache()
         cached_rec = cache.get(message_id)
@@ -1387,9 +1424,13 @@ def _backfill_missing_cmr_containers(message_id, record):
         cached_rec["containers_backfill_attempted"] = True
         if containers:
             cached_rec["containers"] = _merge_containers(cached_rec.get("containers"), containers)
+            cached_rec["containers_low_confidence"] = low_confidence
+            cached_rec["containers_confidence_score"] = confidence_score
             for d in cached_rec.get("documents", []):
                 if d.get("source") == "attachment" and d.get("type") == "Cmr":
                     d["containers"] = _merge_containers(d.get("containers"), containers)
+                    d["containers_low_confidence"] = low_confidence
+                    d["containers_confidence_score"] = confidence_score
         cache[message_id] = cached_rec
         _save_cache(cache)
         return dict(cached_rec)
@@ -1432,13 +1473,19 @@ def _classify_documents_with_overrides(message_id, subject, body_html, attachmen
                 find_container_numbers(" ".join(page_texts)),
                 find_container_numbers(filename),
             )
+            containers_low_confidence = False
+            containers_confidence_score = None
             if not containers:
                 # No text layer (scanned/handwritten CMR) and nothing in the filename -
                 # the deterministic pass above has nothing left to work with even though
                 # the container number is plainly visible on the page. Ask Gemini to
                 # read it directly off the image/PDF bytes instead of leaving this
                 # document's containers empty.
-                containers = _extract_containers_via_llm(gemini, data_bytes, mime, filename)
+                containers, containers_confidence_score = _extract_containers_via_llm(gemini, data_bytes, mime, filename)
+                containers_low_confidence = (
+                    containers_confidence_score is not None
+                    and containers_confidence_score <= _CONTAINER_CONFIDENCE_THRESHOLD
+                )
             sub_docs = [{
                 "source": "attachment",
                 "filename": filename,
@@ -1448,6 +1495,8 @@ def _classify_documents_with_overrides(message_id, subject, body_html, attachmen
                 "method": override_method,
                 "reason": override_reason,
                 "containers": containers,
+                "containers_low_confidence": containers_low_confidence,
+                "containers_confidence_score": containers_confidence_score,
                 "attachment_index": i,
             }]
         else:
@@ -1465,12 +1514,31 @@ def _classify_documents_with_overrides(message_id, subject, body_html, attachmen
     else:
         all_containers = _merge_containers(*[d.get("containers") for d in documents])
 
+    # Exposed separately (not merged away) so a caller whose attachment read came back
+    # low-confidence (see containers_low_confidence below) can still get at a container
+    # number mentioned directly in the mail's own subject/body text as an alternate
+    # source, even though attachment_containers already "won" above.
+    body_containers = next((d.get("containers") for d in documents if d.get("source") == "body"), []) or []
+
+    attachment_scores = [
+        d.get("containers_confidence_score") for d in documents
+        if d.get("source") == "attachment" and d.get("containers_confidence_score") is not None
+    ]
+
     record = {
         "message_id": message_id,
         "email_type": email_type,
         "doc_types": _distinct_types([d["type"] for d in documents]),
         "type_counts": _type_counts([d["type"] for d in documents if d["source"] == "attachment"]),
         "containers": all_containers,
+        "containers_low_confidence": any(
+            d.get("containers_low_confidence") for d in documents if d.get("source") == "attachment"
+        ),
+        # Lowest score across attachments, for the UI to show (e.g. "62% confidence") -
+        # None when every attachment's containers came from deterministic regex (no LLM
+        # read was ever needed, so there's no self-rated score to show).
+        "containers_confidence_score": min(attachment_scores) if attachment_scores else None,
+        "body_containers": body_containers,
         "documents": documents,
         "source": "deep",
         "classified_at": datetime.now(timezone.utc).isoformat(),

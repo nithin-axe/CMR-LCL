@@ -1989,8 +1989,14 @@
 
         fetchDocTypeOptions().then(({ options, source }) => {
             const rows = jobs.map((job, jobIndex) => {
+                const confScore = job.containers_confidence_score;
+                const confLabel = (confScore || confScore === 0) ? ` (${Math.round(confScore)}% confidence)` : "";
+                const lowConfidenceNote = job.containers_low_confidence
+                    ? ` <span style="display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:6px; background:#fef3c7; color:#b45309; border:1px solid #fde68a; font-size:0.72rem; font-weight:600;" title="The document's own container read scored ${confLabel ? Math.round(confScore) + '%' : 'low'} confidence (threshold: >80%) - if this search comes back with no record, the SF number / the mail's own subject or body will be tried instead before giving up.">
+                        <i class="fa-solid fa-triangle-exclamation"></i> Low confidence read${confLabel}</span>`
+                    : "";
                 const containers = (job.containers && job.containers.length)
-                    ? containerChips(job.containers)
+                    ? containerChips(job.containers) + lowConfidenceNote
                     : '<span class="process-review-empty">No container numbers found</span>';
 
                 const types = (job.doc_types && job.doc_types.length)
